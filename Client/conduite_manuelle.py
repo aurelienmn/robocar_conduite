@@ -19,6 +19,12 @@ MAX_SPEED = 0.08
 DEADZONE = 0.03
 
 COMM_SET_DUTY = 5
+COMM_SET_SERVO_POS = 12
+
+SERVO_CENTER = 0.50
+SERVO_RANGE = 0.30
+SERVO_MIN = 0.20
+SERVO_MAX = 0.80
 
 
 def limiter(value, min_value=-1.0, max_value=1.0):
@@ -86,9 +92,18 @@ def set_steering(steering):
     steering = apply_deadzone(steering)
     steering = limiter(steering)
 
-    # Pour l'instant, on lit seulement la direction.
-    # Le VESC commande le moteur, pas forcément le servo de direction.
-    print(f"DIRECTION: {steering:.2f}")
+    servo_pos = SERVO_CENTER + steering * SERVO_RANGE
+    servo_pos = max(SERVO_MIN, min(SERVO_MAX, servo_pos))
+
+    servo_value = int(servo_pos * 1000)
+
+    payload = bytearray()
+    payload.append(COMM_SET_SERVO_POS)
+    payload.extend(struct.pack(">h", servo_value))
+
+    send_vesc_packet(vesc, payload)
+
+    print(f"DIRECTION: {steering:.2f} | SERVO: {servo_pos:.3f}")
 
 
 def stop_car():
