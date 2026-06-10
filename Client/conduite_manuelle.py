@@ -13,9 +13,10 @@ import serial
 VESC_PORT = "/dev/ttyACM0"
 VESC_BAUDRATE = 115200
 
-MAX_SPEED = 0.05
-DEADZONE = 0.03
-SMOOTHING = 0.08
+MAX_SPEED = 0.04
+DEADZONE = 0.05
+SMOOTHING = 0.20
+MIN_START_SPEED = 0.015
 
 COMM_SET_DUTY = 5
 
@@ -74,6 +75,11 @@ def set_motor(throttle):
     throttle = apply_deadzone(throttle)
     throttle = limiter(throttle, -MAX_SPEED, MAX_SPEED)
 
+    if throttle > 0:
+        throttle = max(throttle, MIN_START_SPEED)
+    elif throttle < 0:
+        throttle = min(throttle, -MIN_START_SPEED)
+
     current_throttle = current_throttle + (throttle - current_throttle) * SMOOTHING
 
     duty_value = int(current_throttle * 100000)
@@ -109,7 +115,7 @@ def main():
     print("R2 = accélérer")
     print("L2 = freiner / reculer")
     print("OPTIONS = arrêt")
-    print("Vitesse limitée à 5 %")
+    print("Vitesse limitée à 4 %")
 
     try:
         while gamepad.isConnected():
@@ -127,7 +133,7 @@ def main():
             if gamepad.beenPressed("OPTIONS"):
                 break
 
-            time.sleep(0.05)
+            time.sleep(0.02)
 
     finally:
         print("Arrêt sécurité")
