@@ -12,14 +12,24 @@ import serial
 
 VESC_PORT = "/dev/ttyACM0"
 VESC_BAUDRATE = 115200
-MAX_SPEED = 0.05  # 5 % pour le premier test
 
+MAX_SPEED = 0.05
+DEADZONE = 0.03
+SMOOTHING = 0.08
 
 COMM_SET_DUTY = 5
+
+current_throttle = 0.0
 
 
 def limiter(value, min_value=-1.0, max_value=1.0):
     return max(min_value, min(max_value, value))
+
+
+def apply_deadzone(value, deadzone=DEADZONE):
+    if abs(value) < deadzone:
+        return 0.0
+    return value
 
 
 def normalize_trigger(value):
@@ -42,17 +52,14 @@ def crc16(data):
 
 
 def send_vesc_packet(ser, payload):
-    payload_len = len(payload)
     packet = bytearray()
-
     packet.append(2)
-    packet.append(payload_len)
+    packet.append(len(payload))
     packet.extend(payload)
 
     crc = crc16(payload)
     packet.append((crc >> 8) & 0xFF)
     packet.append(crc & 0xFF)
-
     packet.append(3)
 
     ser.write(packet)
@@ -62,16 +69,22 @@ vesc = serial.Serial(VESC_PORT, VESC_BAUDRATE, timeout=0.1)
 
 
 def set_motor(throttle):
+    global current_throttle
+
+    throttle = apply_deadzone(throttle)
     throttle = limiter(throttle, -MAX_SPEED, MAX_SPEED)
 
-    duty_value = int(throttle * 100000)
+    current_throttle = current_throttle + (throttle - current_throttle) * SMOOTHING
+
+    duty_value = int(current_throttle * 100000)
+
     payload = bytearray()
     payload.append(COMM_SET_DUTY)
     payload.extend(struct.pack(">i", duty_value))
 
     send_vesc_packet(vesc, payload)
 
-    print(f"MOTEUR: {throttle:.2f}")
+    print(f"MOTEUR: {current_throttle:.3f}")
 
 
 def set_steering(steering):
@@ -80,6 +93,9 @@ def set_steering(steering):
 
 
 def stop_car():
+    global current_throttle
+
+    current_throttle = 0.0
     set_motor(0.0)
     set_steering(0.0)
 
@@ -102,7 +118,8 @@ def main():
             rt = normalize_trigger(gamepad.axis("R2"))
             lt = normalize_trigger(gamepad.axis("L2"))
 
-            throttle = limiter(rt - lt) * MAX_SPEED
+            raw_throttle = rt - lt
+            throttle = limiter(raw_throttle) * MAX_SPEED
 
             set_steering(steering)
             set_motor(throttle)
@@ -110,7 +127,7 @@ def main():
             if gamepad.beenPressed("OPTIONS"):
                 break
 
-            time.sleep(0.02)
+            time.sleep(0.05)
 
     finally:
         print("Arrêt sécurité")
