@@ -1,19 +1,21 @@
 import time
 import sys
+import struct
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT / "Gamepad"))
 
 import Gamepad
-from pyvesc import encode
-from pyvesc.messages.setters import SetDutyCycle
 import serial
 
 
 VESC_PORT = "/dev/ttyACM0"
 VESC_BAUDRATE = 115200
-MAX_SPEED = 0.20
+MAX_SPEED = 0.05  # 5 % pour le premier test
+
+
+COMM_SET_DUTY = 5
 
 
 def limiter(value, min_value=-1.0, max_value=1.0):
@@ -26,13 +28,49 @@ def normalize_trigger(value):
     return value
 
 
+def crc16(data):
+    crc = 0
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            if crc & 0x8000:
+                crc = (crc << 1) ^ 0x1021
+            else:
+                crc <<= 1
+            crc &= 0xFFFF
+    return crc
+
+
+def send_vesc_packet(ser, payload):
+    payload_len = len(payload)
+    packet = bytearray()
+
+    packet.append(2)
+    packet.append(payload_len)
+    packet.extend(payload)
+
+    crc = crc16(payload)
+    packet.append((crc >> 8) & 0xFF)
+    packet.append(crc & 0xFF)
+
+    packet.append(3)
+
+    ser.write(packet)
+
+
 vesc = serial.Serial(VESC_PORT, VESC_BAUDRATE, timeout=0.1)
 
 
 def set_motor(throttle):
     throttle = limiter(throttle, -MAX_SPEED, MAX_SPEED)
-    packet = encode(SetDutyCycle(throttle))
-    vesc.write(packet)
+
+    duty_value = int(throttle * 100000)
+    payload = bytearray()
+    payload.append(COMM_SET_DUTY)
+    payload.extend(struct.pack(">i", duty_value))
+
+    send_vesc_packet(vesc, payload)
+
     print(f"MOTEUR: {throttle:.2f}")
 
 
@@ -55,7 +93,7 @@ def main():
     print("R2 = accélérer")
     print("L2 = freiner / reculer")
     print("OPTIONS = arrêt")
-    print("Vitesse limitée à 20 %")
+    print("Vitesse limitée à 5 %")
 
     try:
         while gamepad.isConnected():
