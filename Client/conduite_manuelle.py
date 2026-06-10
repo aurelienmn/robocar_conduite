@@ -15,10 +15,10 @@ import serial
 VESC_PORT = "/dev/ttyACM0"
 VESC_BAUDRATE = 115200
 
-DEADZONE = 0.03
-COMM_SET_DUTY = 5
+MAX_SPEED = 0.08      # 8 %
+DEADZONE = 0.03       # ignore les petites valeurs de la manette
 
-current_throttle = 0.0
+COMM_SET_DUTY = 5
 
 
 def limiter(value, min_value=-1.0, max_value=1.0):
@@ -69,7 +69,7 @@ vesc = serial.Serial(VESC_PORT, VESC_BAUDRATE, timeout=0.1)
 
 def set_motor(throttle):
     throttle = apply_deadzone(throttle)
-    throttle = limiter(throttle)
+    throttle = limiter(throttle, -MAX_SPEED, MAX_SPEED)
 
     duty_value = int(throttle * 100000)
 
@@ -85,6 +85,7 @@ def set_motor(throttle):
 def set_steering(steering):
     steering = apply_deadzone(steering)
     steering = limiter(steering)
+
     print(f"DIRECTION: {steering:.2f}")
 
 
@@ -102,7 +103,8 @@ def main():
     print("R2 = accélérer")
     print("L2 = freiner / reculer")
     print("OPTIONS = arrêt")
-    print("ATTENTION : vitesse non limitée dans le code")
+    print(f"Vitesse limitée à {MAX_SPEED * 100:.0f} %")
+    print(f"Deadzone : {DEADZONE}")
 
     try:
         while gamepad.isConnected():
@@ -111,7 +113,8 @@ def main():
             rt = normalize_trigger(gamepad.axis("R2"))
             lt = normalize_trigger(gamepad.axis("L2"))
 
-            throttle = rt - lt
+            raw_throttle = rt - lt
+            throttle = raw_throttle * MAX_SPEED
 
             set_steering(steering)
             set_motor(throttle)
