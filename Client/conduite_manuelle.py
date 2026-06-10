@@ -1,3 +1,5 @@
+# coding: utf-8
+
 import time
 import sys
 import struct
@@ -13,11 +15,7 @@ import serial
 VESC_PORT = "/dev/ttyACM0"
 VESC_BAUDRATE = 115200
 
-MAX_SPEED = 0.04
-DEADZONE = 0.002
-SMOOTHING = 0.20
-MIN_START_SPEED = 0.015
-
+DEADZONE = 0.03
 COMM_SET_DUTY = 5
 
 current_throttle = 0.0
@@ -27,8 +25,8 @@ def limiter(value, min_value=-1.0, max_value=1.0):
     return max(min_value, min(max_value, value))
 
 
-def apply_deadzone(value, deadzone=DEADZONE):
-    if abs(value) < deadzone:
+def apply_deadzone(value):
+    if abs(value) < DEADZONE:
         return 0.0
     return value
 
@@ -70,19 +68,10 @@ vesc = serial.Serial(VESC_PORT, VESC_BAUDRATE, timeout=0.1)
 
 
 def set_motor(throttle):
-    global current_throttle
-
     throttle = apply_deadzone(throttle)
-    throttle = limiter(throttle, -MAX_SPEED, MAX_SPEED)
+    throttle = limiter(throttle)
 
-    if throttle > 0:
-        throttle = max(throttle, MIN_START_SPEED)
-    elif throttle < 0:
-        throttle = min(throttle, -MIN_START_SPEED)
-
-    current_throttle = current_throttle + (throttle - current_throttle) * SMOOTHING
-
-    duty_value = int(current_throttle * 100000)
+    duty_value = int(throttle * 100000)
 
     payload = bytearray()
     payload.append(COMM_SET_DUTY)
@@ -90,18 +79,16 @@ def set_motor(throttle):
 
     send_vesc_packet(vesc, payload)
 
-    print(f"MOTEUR: {current_throttle:.3f}")
+    print(f"MOTEUR: {throttle:.3f}")
 
 
 def set_steering(steering):
+    steering = apply_deadzone(steering)
     steering = limiter(steering)
     print(f"DIRECTION: {steering:.2f}")
 
 
 def stop_car():
-    global current_throttle
-
-    current_throttle = 0.0
     set_motor(0.0)
     set_steering(0.0)
 
@@ -115,17 +102,16 @@ def main():
     print("R2 = accélérer")
     print("L2 = freiner / reculer")
     print("OPTIONS = arrêt")
-    print("Vitesse limitée à 4 %")
+    print("ATTENTION : vitesse non limitée dans le code")
 
     try:
         while gamepad.isConnected():
-            steering = limiter(gamepad.axis("LEFT-X"))
+            steering = gamepad.axis("LEFT-X")
 
             rt = normalize_trigger(gamepad.axis("R2"))
             lt = normalize_trigger(gamepad.axis("L2"))
 
-            raw_throttle = rt - lt
-            throttle = limiter(raw_throttle) * MAX_SPEED
+            throttle = rt - lt
 
             set_steering(steering)
             set_motor(throttle)
