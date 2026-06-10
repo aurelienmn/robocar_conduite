@@ -15,8 +15,16 @@ import serial
 VESC_PORT = "/dev/ttyACM0"
 VESC_BAUDRATE = 115200
 
-MAX_SPEED = 0.08      # 8 %
-DEADZONE = 0.03       # ignore les petites valeurs de la manette
+ARDUINO_PORT = "/dev/ttyUSB0"
+ARDUINO_BAUDRATE = 115200
+
+MAX_SPEED = 0.08
+DEADZONE = 0.03
+
+STEERING_CENTER = 90
+STEERING_RANGE = 35
+STEERING_MIN = STEERING_CENTER - STEERING_RANGE
+STEERING_MAX = STEERING_CENTER + STEERING_RANGE
 
 COMM_SET_DUTY = 5
 
@@ -65,6 +73,8 @@ def send_vesc_packet(ser, payload):
 
 
 vesc = serial.Serial(VESC_PORT, VESC_BAUDRATE, timeout=0.1)
+arduino = serial.Serial(ARDUINO_PORT, ARDUINO_BAUDRATE, timeout=0.1)
+time.sleep(2)
 
 
 def set_motor(throttle):
@@ -86,7 +96,12 @@ def set_steering(steering):
     steering = apply_deadzone(steering)
     steering = limiter(steering)
 
-    print(f"DIRECTION: {steering:.2f}")
+    angle = int(STEERING_CENTER + steering * STEERING_RANGE)
+    angle = max(STEERING_MIN, min(STEERING_MAX, angle))
+
+    arduino.write(f"S:{angle}\n".encode())
+
+    print(f"DIRECTION: {steering:.2f} | ANGLE: {angle}")
 
 
 def stop_car():
@@ -104,7 +119,6 @@ def main():
     print("L2 = freiner / reculer")
     print("OPTIONS = arrêt")
     print(f"Vitesse limitée à {MAX_SPEED * 100:.0f} %")
-    print(f"Deadzone : {DEADZONE}")
 
     try:
         while gamepad.isConnected():
@@ -129,6 +143,7 @@ def main():
         stop_car()
         gamepad.disconnect()
         vesc.close()
+        arduino.close()
 
 
 if __name__ == "__main__":
