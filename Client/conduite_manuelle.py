@@ -15,8 +15,8 @@ import serial
 VESC_PORT = "/dev/ttyACM0"
 VESC_BAUDRATE = 115200
 
-MAX_SPEED = 0.08      # 8 %
-DEADZONE = 0.03       # ignore les petites valeurs de la manette
+MAX_SPEED = 0.08
+DEADZONE = 0.03
 
 COMM_SET_DUTY = 5
 
@@ -86,6 +86,8 @@ def set_steering(steering):
     steering = apply_deadzone(steering)
     steering = limiter(steering)
 
+    # Pour l'instant, on lit seulement la direction.
+    # Le VESC commande le moteur, pas forcément le servo de direction.
     print(f"DIRECTION: {steering:.2f}")
 
 
@@ -113,8 +115,7 @@ def main():
             rt = normalize_trigger(gamepad.axis("R2"))
             lt = normalize_trigger(gamepad.axis("L2"))
 
-            raw_throttle = rt - lt
-            throttle = raw_throttle * MAX_SPEED
+            throttle = (rt - lt) * MAX_SPEED
 
             set_steering(steering)
             set_motor(throttle)
