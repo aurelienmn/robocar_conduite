@@ -1,28 +1,22 @@
-# coding: utf-8
-
 import cv2
+import depthai as dai
 
-CAMERA_ID = 0
+pipeline = dai.Pipeline()
 
-cap = cv2.VideoCapture(CAMERA_ID)
+cam = pipeline.create(dai.node.ColorCamera)
+cam.setPreviewSize(640, 480)
 
-if not cap.isOpened():
-    print("Erreur : caméra non détectée")
-    exit(1)
+xout = pipeline.create(dai.node.XLinkOut)
+xout.setStreamName("rgb")
+cam.preview.link(xout.input)
 
-print("Caméra détectée. Appuie sur Q pour quitter.")
+with dai.Device(pipeline) as device:
+    q = device.getOutputQueue("rgb")
 
-while True:
-    ret, frame = cap.read()
+    while True:
+        frame = q.get().getCvFrame()
 
-    if not ret:
-        print("Erreur : impossible de lire l'image")
-        break
+        cv2.imshow("OAK-D Lite", frame)
 
-    cv2.imshow("Test camera", frame)
-
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
-
-cap.release()
-cv2.destroyAllWindows()
+        if cv2.waitKey(1) == ord("q"):
+            break
