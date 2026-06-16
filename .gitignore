@@ -1,1 +1,12 @@
 venv
+venv-oak-test/
+__pycache__/
+*.pyc
+data/
+.cache/
+debug_camera/
+debug_camera_*/
+debug_preview/
+debug_preview_clean/
+debug_oak_streams/
+debug_oak_controls/
