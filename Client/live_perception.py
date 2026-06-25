@@ -81,6 +81,18 @@ class WhiteTapePerception:
 
     @staticmethod
     def _filter_components(mask, min_area, min_bottom_fraction):
+        """
+        Garde uniquement les composantes blanches qui sont :
+          1. Assez grandes (>= min_area pixels)
+          2. Proches de la voiture : leur bord bas est dans les
+             (1 - min_bottom_fraction)*100 % inferieurs du frame.
+
+        Cela elimine le decor (murs, objets) qui apparait en haut du frame.
+
+        Si le decor est encore detecte  -> augmenter min_bottom_fraction (ex: 0.55)
+        Si les bandes sont perdues      -> diminuer min_bottom_fraction (ex: 0.35)
+        Ces valeurs se changent dans live_config.json
+        """
         h = mask.shape[0]
         labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(
             mask.astype(np.uint8),

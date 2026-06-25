@@ -4,6 +4,7 @@ from typing import Optional
 import numpy as np
 
 from live_settings import ControllerSettings
+from corner_model import CornerModel
 
 
 @dataclass(frozen=True)
@@ -19,16 +20,31 @@ def clamp(value: float, min_value: float, max_value: float) -> float:
 
 
 class RaycastLineFollower:
-    """Premier modele live: suivre l'espace libre entre les bandes blanches.
+    """
+    Controleur algorithmique : suit l'espace libre entre les bandes blanches.
 
-    Convention:
-    - steering -1 = gauche, +1 = droite
-    - ray 0 = droite, ray central = devant, dernier ray = gauche
+    Convention rayons :
+      ray 0 = droite extreme, ray central = devant, dernier ray = gauche extreme
+
+    Mode hybride :
+      Si corner_model_weights.npz est present dans Client/,
+      le modele ML prend progressivement le relais dans les virages serres.
+      Sinon, l'algo seul est utilise (pas d'erreur).
+
+    Parametres cles dans live_config.json (section controller) :
+      base_throttle        : vitesse normale (augmenter si trop lent)
+      max_throttle         : vitesse max absolue
+      steering_gain        : amplification du braquage (augmenter si vire trop peu)
+      avoid_gain           : centrage entre les deux bandes
+      steering_smoothing   : lissage du volant (0=brusque, 1=tres lisse)
+      throttle_turn_slowdown : freinage en virage (1=arret complet en virage)
+      emergency_distance_px  : distance en pixels avant evitement urgence
     """
 
     def __init__(self, settings: ControllerSettings) -> None:
         self.settings = settings
         self.previous_steering = 0.0
+        self.corner_model = CornerModel.load_if_available()
 
     def predict(self, raycast: np.ndarray, mask_fraction: float, dt_s: Optional[float] = None) -> DriveCommand:
         distances = np.asarray(raycast, dtype=np.float32).reshape(-1)
@@ -61,7 +77,16 @@ class RaycastLineFollower:
 
         center_window = distances[max(0, middle - 1) : min(n_rays, middle + 2)]
         front_min = float(center_window.min())
-        reason = f"target_ray={target_idx}"
+        reason = "target_ray={}".format(target_idx)
+
+        # Blend modele ML en virage serre si disponible
+        if self.corner_model is not None:
+            asymmetry = abs(left_clear - right_clear) / max(left_clear + right_clear, 1.0)
+            if asymmetry > 0.45:
+                ml_steering = self.corner_model.predict(distances)
+                blend = min((asymmetry - 0.45) / 0.55, 1.0)
+                steering = (1.0 - blend) * steering + blend * ml_steering
+                reason = "ml_corner(blend={:.2f})".format(blend)
 
         if front_min < self.settings.emergency_distance_px:
             steering = -0.85 if left_clear > right_clear else 0.85

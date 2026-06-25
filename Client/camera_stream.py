@@ -1,3 +1,12 @@
+# ============================================================
+# camera_stream.py
+# Lance un serveur HTTP sur le port 5000.
+# Ouvre http://<IP_DE_LA_PI>:5000 dans ton navigateur
+# pour voir le flux camera avec le mask (rouge) et les rayons.
+#
+# Lancement : python3 camera_stream.py
+# ============================================================
+
 from flask import Flask, Response
 import cv2
 import depthai as dai

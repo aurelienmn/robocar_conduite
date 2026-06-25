@@ -19,7 +19,7 @@ class CameraSettings:
 
 @dataclass(frozen=True)
 class PerceptionSettings:
-    n_rays: int = 9
+    n_rays: int = 12
     fov: float = 180.0
     min_frame_std: float = 3.0
     white_value_min: int = 150
