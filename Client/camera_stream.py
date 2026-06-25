@@ -7,16 +7,16 @@ app = Flask(__name__)
 pipeline = dai.Pipeline()
 
 cam = pipeline.createColorCamera()
-cam.setPreviewSize(640, 480)
+cam.setPreviewSize(426, 240)
 cam.setInterleaved(False)
-cam.setFps(30)
+cam.setFps(20)
 
 xout = pipeline.createXLinkOut()
 xout.setStreamName("video")
 cam.preview.link(xout.input)
 
 device = dai.Device(pipeline)
-queue = device.getOutputQueue(name="video", maxSize=4, blocking=False)
+queue = device.getOutputQueue(name="video", maxSize=1, blocking=False)
 
 @app.route("/")
 def index():
