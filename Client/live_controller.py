@@ -1,6 +1,5 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 
@@ -31,7 +30,7 @@ class RaycastLineFollower:
         self.settings = settings
         self.previous_steering = 0.0
 
-    def predict(self, raycast: np.ndarray, mask_fraction: float, dt_s: float | None = None) -> DriveCommand:
+    def predict(self, raycast: np.ndarray, mask_fraction: float, dt_s: Optional[float] = None) -> DriveCommand:
         distances = np.asarray(raycast, dtype=np.float32).reshape(-1)
         if distances.size == 0 or not np.isfinite(distances).all():
             return self._lost("invalid_raycast")
@@ -84,7 +83,7 @@ class RaycastLineFollower:
         confidence = clamp(mask_fraction / max(self.settings.lost_mask_fraction * 8.0, 1e-6), 0.0, 1.0)
         return DriveCommand(throttle=throttle, steering=steering, confidence=confidence, reason=reason)
 
-    def _steering_alpha(self, dt_s: float | None) -> float:
+    def _steering_alpha(self, dt_s: Optional[float]) -> float:
         if dt_s is None or self.settings.steering_time_constant_s <= 0.0:
             return clamp(self.settings.steering_smoothing, 0.0, 1.0)
         return clamp(dt_s / (self.settings.steering_time_constant_s + dt_s), 0.0, 1.0)

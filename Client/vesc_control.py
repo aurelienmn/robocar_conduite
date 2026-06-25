@@ -1,6 +1,5 @@
-from __future__ import annotations
-
 import struct
+from typing import Union
 
 from live_settings import VescSettings
 
@@ -13,7 +12,7 @@ def clamp(value: float, min_value: float, max_value: float) -> float:
     return max(min_value, min(max_value, value))
 
 
-def crc16(data: bytes | bytearray) -> int:
+def crc16(data: Union[bytes, bytearray]) -> int:
     crc = 0
     for byte in data:
         crc ^= byte << 8

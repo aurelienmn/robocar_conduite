@@ -1,7 +1,6 @@
-from __future__ import annotations
-
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 
@@ -14,7 +13,7 @@ from live_settings import LiveSettings
 class LiveResult:
     command: DriveCommand
     perception: PerceptionResult
-    dt_s: float | None
+    dt_s: Optional[float]
 
 
 class LiveDriver:
@@ -23,7 +22,7 @@ class LiveDriver:
     def __init__(self, settings: LiveSettings) -> None:
         self.perception = WhiteTapePerception(settings.perception)
         self.controller = RaycastLineFollower(settings.controller)
-        self.previous_prediction_time: float | None = None
+        self.previous_prediction_time: Optional[float] = None
 
     def predict_bgr(self, frame_bgr: np.ndarray) -> LiveResult:
         now = time.monotonic()

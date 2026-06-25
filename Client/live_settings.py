@@ -1,9 +1,7 @@
-from __future__ import annotations
-
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, Union
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -73,14 +71,14 @@ class LiveSettings:
     vesc: VescSettings
 
 
-def _section(data: dict[str, Any], key: str) -> dict[str, Any]:
+def _section(data: Dict[str, Any], key: str) -> Dict[str, Any]:
     section = data.get(key, {})
     if not isinstance(section, dict):
         raise ValueError(f"Config section '{key}' must be an object")
     return section
 
 
-def load_settings(path: str | Path = DEFAULT_CONFIG) -> LiveSettings:
+def load_settings(path: Union[str, Path] = DEFAULT_CONFIG) -> LiveSettings:
     with Path(path).open(encoding="utf-8") as f:
         data = json.load(f)
 

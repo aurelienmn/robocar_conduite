@@ -14,17 +14,17 @@
     "saturation_max": 95,
     "min_rgb": 115,
     "max_rgb_delta": 95,
-    "roi_top_fraction": 0.30,
+    "roi_top_fraction": 0.15,
     "roi_bottom_fraction": 0.06,
     "morphology_kernel": 3,
     "open_iterations": 1,
     "dilate_iterations": 0,
-    "min_component_area": 350
+    "min_component_area": 150
   },
   "controller": {
     "base_throttle": 0.028,
-    "min_throttle": 0.0,
-    "max_throttle": 0.045,
+    "min_throttle": 0.02,
+    "max_throttle": 0.10,
     "steering_gain": 1.10,
     "avoid_gain": 0.45,
     "steering_smoothing": 0.35,

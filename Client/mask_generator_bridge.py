@@ -1,15 +1,14 @@
-from __future__ import annotations
-
 import os
 import sys
 from pathlib import Path
+from typing import List
 
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def _candidate_roots() -> list[Path]:
-    candidates: list[Path] = []
+def _candidate_roots() -> List[Path]:
+    candidates: List[Path] = []
     env_path = os.environ.get("MASK_GENERATOR_ROOT")
     if env_path:
         candidates.append(Path(env_path))
