@@ -4,15 +4,43 @@ import depthai as dai
 
 app = Flask(__name__)
 
-# Initialisation DepthAI...
+pipeline = dai.Pipeline()
+
+cam = pipeline.createColorCamera()
+cam.setPreviewSize(640, 480)
+cam.setInterleaved(False)
+cam.setFps(30)
+
+xout = pipeline.createXLinkOut()
+xout.setStreamName("video")
+cam.preview.link(xout.input)
+
+device = dai.Device(pipeline)
+queue = device.getOutputQueue(name="video", maxSize=4, blocking=False)
+
+@app.route("/")
+def index():
+    return '<h1>Robocar Camera</h1><img src="/video">'
 
 @app.route("/video")
 def video():
-    while True:
-        # récupérer une image
-        _, jpeg = cv2.imencode(".jpg", frame)
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' +
-               jpeg.tobytes() + b'\r\n')
+    def generate():
+        while True:
+            packet = queue.get()
+            frame = packet.getCvFrame()
 
-app.run(host="0.0.0.0", port=5000)
+            ok, jpeg = cv2.imencode(".jpg", frame)
+            if not ok:
+                continue
+
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n" +
+                jpeg.tobytes() +
+                b"\r\n"
+            )
+
+    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
