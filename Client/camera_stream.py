@@ -2,7 +2,14 @@ from flask import Flask, Response
 import cv2
 import depthai as dai
 
+from live_driver import LiveDriver
+from live_perception import draw_debug
+from live_settings import load_settings
+
 app = Flask(__name__)
+
+settings = load_settings()
+driver = LiveDriver(settings)
 
 pipeline = dai.Pipeline()
 
@@ -29,7 +36,15 @@ def video():
             packet = queue.get()
             frame = packet.getCvFrame()
 
-            ok, jpeg = cv2.imencode(".jpg", frame)
+            result = driver.predict_bgr(frame)
+            debug = draw_debug(
+                result.perception,
+                result.command.throttle,
+                result.command.steering,
+                result.command.reason,
+            )
+
+            ok, jpeg = cv2.imencode(".jpg", debug)
             if not ok:
                 continue
 

@@ -32,6 +32,7 @@ class PerceptionSettings:
     open_iterations: int = 1
     dilate_iterations: int = 0
     min_component_area: int = 350
+    min_bottom_fraction: float = 0.45
 
 
 @dataclass(frozen=True)

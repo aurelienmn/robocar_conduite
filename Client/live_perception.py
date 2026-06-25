@@ -71,12 +71,17 @@ class WhiteTapePerception:
             mask = mask_u8 > 0
 
         if self.settings.min_component_area > 0 and mask.any():
-            mask = self._filter_small_components(mask, self.settings.min_component_area)
+            mask = self._filter_components(
+                mask,
+                self.settings.min_component_area,
+                self.settings.min_bottom_fraction,
+            )
 
         return mask
 
     @staticmethod
-    def _filter_small_components(mask: np.ndarray, min_area: int) -> np.ndarray:
+    def _filter_components(mask, min_area, min_bottom_fraction):
+        h = mask.shape[0]
         labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(
             mask.astype(np.uint8),
             connectivity=8,
@@ -84,8 +89,10 @@ class WhiteTapePerception:
         if labels_count <= 1:
             return mask
 
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        bottom_y = stats[1:, cv2.CC_STAT_TOP] + stats[1:, cv2.CC_STAT_HEIGHT]
         keep = np.zeros(labels_count, dtype=bool)
-        keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= min_area
+        keep[1:] = (areas >= min_area) & (bottom_y >= int(h * min_bottom_fraction))
         return keep[labels]
 
     def process(self, frame_bgr: np.ndarray) -> PerceptionResult:
