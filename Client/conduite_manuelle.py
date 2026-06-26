@@ -112,30 +112,30 @@ def stop_car():
 
 
 def main():
-    gamepad = Gamepad.PS4()
+    gamepad = Gamepad.Xbox360()
     gamepad.startBackgroundUpdates()
 
     print("Conduite manuelle démarrée")
     print("Stick gauche = direction")
-    print("R2 = accélérer")
-    print("L2 = freiner / reculer")
-    print("OPTIONS = arrêt")
+    print("RT = accélérer")
+    print("LT = freiner / reculer")
+    print("START = arrêt")
     print(f"Vitesse limitée à {MAX_SPEED * 100:.0f} %")
     print(f"Deadzone : {DEADZONE}")
 
     try:
         while gamepad.isConnected():
-            steering = gamepad.axis("LEFT-X")
+            steering = gamepad.axis("LX")
 
-            rt = normalize_trigger(gamepad.axis("R2"))
-            lt = normalize_trigger(gamepad.axis("L2"))
+            rt = normalize_trigger(gamepad.axis("RT"))
+            lt = normalize_trigger(gamepad.axis("LT"))
 
             throttle = (rt - lt) * MAX_SPEED
 
             set_steering(steering)
             set_motor(throttle)
 
-            if gamepad.beenPressed("OPTIONS"):
+            if gamepad.beenPressed("START"):
                 break
 
             time.sleep(0.02)
