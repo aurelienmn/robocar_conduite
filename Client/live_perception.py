@@ -15,6 +15,7 @@ cast_rays = load_cast_rays()
 class PerceptionResult:
     frame_bgr: np.ndarray
     mask: np.ndarray
+    mask_rejected: np.ndarray
     raycast: np.ndarray
     mask_fraction: float
 
@@ -70,28 +71,31 @@ class WhiteTapePerception:
                 mask_u8 = cv2.dilate(mask_u8, kernel, iterations=self.settings.dilate_iterations)
             mask = mask_u8 > 0
 
+        mask_before_filter = mask.copy()
+
         if self.settings.min_component_area > 0 and mask.any():
             mask = self._filter_components(
                 mask,
                 self.settings.min_component_area,
+                self.settings.max_component_area,
                 self.settings.min_bottom_fraction,
             )
 
-        return mask
+        return mask, mask_before_filter
 
     @staticmethod
-    def _filter_components(mask, min_area, min_bottom_fraction):
+    def _filter_components(mask, min_area, max_area, min_bottom_fraction, n_closest=4):
         """
         Garde uniquement les composantes blanches qui sont :
           1. Assez grandes (>= min_area pixels)
-          2. Proches de la voiture : leur bord bas est dans les
-             (1 - min_bottom_fraction)*100 % inferieurs du frame.
+          2. Pas trop grandes (<= max_area pixels) — rejette murs/sols blancs
+          3. Proches de la voiture (bord bas >= min_bottom_fraction * hauteur)
+          4. Parmi les n_closest plus proches de la camera (bord bas le plus bas)
 
-        Cela elimine le decor (murs, objets) qui apparait en haut du frame.
-
-        Si le decor est encore detecte  -> augmenter min_bottom_fraction (ex: 0.55)
-        Si les bandes sont perdues      -> diminuer min_bottom_fraction (ex: 0.35)
-        Ces valeurs se changent dans live_config.json
+        Reglages dans live_config.json :
+          min_component_area  : augmenter pour ignorer le bruit
+          max_component_area  : diminuer si les murs sont encore detectes
+          min_bottom_fraction : augmenter si le decor haut est detecte
         """
         h = mask.shape[0]
         labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(
@@ -103,16 +107,32 @@ class WhiteTapePerception:
 
         areas = stats[1:, cv2.CC_STAT_AREA]
         bottom_y = stats[1:, cv2.CC_STAT_TOP] + stats[1:, cv2.CC_STAT_HEIGHT]
+
+        valid = (
+            (areas >= min_area)
+            & (areas <= max_area)
+            & (bottom_y >= int(h * min_bottom_fraction))
+        )
+
+        if not valid.any():
+            return np.zeros_like(mask, dtype=bool)
+
+        valid_indices = np.where(valid)[0]
+        order = np.argsort(-bottom_y[valid_indices])
+        closest = valid_indices[order[:n_closest]]
+
         keep = np.zeros(labels_count, dtype=bool)
-        keep[1:] = (areas >= min_area) & (bottom_y >= int(h * min_bottom_fraction))
+        keep[closest + 1] = True
         return keep[labels]
 
     def process(self, frame_bgr: np.ndarray) -> PerceptionResult:
-        mask = self.predict_mask(frame_bgr)
+        mask, mask_before_filter = self.predict_mask(frame_bgr)
+        rejected = mask_before_filter & ~mask
         raycast = cast_rays(mask, n_rays=self.settings.n_rays, fov=self.settings.fov).astype(np.float32)
         return PerceptionResult(
             frame_bgr=frame_bgr,
             mask=mask,
+            mask_rejected=rejected,
             raycast=raycast,
             mask_fraction=float(mask.mean()),
         )
@@ -120,7 +140,8 @@ class WhiteTapePerception:
 
 def draw_debug(result: PerceptionResult, throttle: float, steering: float, reason: str) -> np.ndarray:
     frame = result.frame_bgr.copy()
-    frame[result.mask] = (0, 0, 255)
+    frame[result.mask_rejected] = (255, 80, 0)   # bleu = elimine
+    frame[result.mask] = (0, 0, 255)              # rouge = capte
 
     h, w = result.mask.shape
     ox, oy = w / 2.0, h - 1.0

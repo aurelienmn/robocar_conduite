@@ -32,6 +32,7 @@ class PerceptionSettings:
     open_iterations: int = 1
     dilate_iterations: int = 0
     min_component_area: int = 350
+    max_component_area: int = 20000
     min_bottom_fraction: float = 0.45
 
 
