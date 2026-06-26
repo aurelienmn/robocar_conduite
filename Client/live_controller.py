@@ -63,7 +63,7 @@ class RaycastLineFollower:
 
         max_distance = max(float(distances.max()), 1.0)
         normalized = np.clip(distances / max_distance, 0.0, 1.0)
-        forward_bias = 1.0 - 0.25 * np.abs(angles - 90.0) / 90.0
+        forward_bias = 1.0 - 0.10 * np.abs(angles - 90.0) / 90.0
         scores = normalized * forward_bias
 
         target_idx = int(np.argmax(scores))

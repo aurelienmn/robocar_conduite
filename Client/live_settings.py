@@ -34,6 +34,7 @@ class PerceptionSettings:
     min_component_area: int = 350
     max_component_area: int = 20000
     min_bottom_fraction: float = 0.45
+    n_closest: int = 2
 
 
 @dataclass(frozen=True)
