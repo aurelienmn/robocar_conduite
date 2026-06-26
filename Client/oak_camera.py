@@ -35,6 +35,9 @@ class OakCamera:
             cam.setInterleaved(False)
             cam.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
 
+            if settings.exposure_compensation != 0:
+                cam.initialControl.setAutoExposureCompensation(settings.exposure_compensation)
+
             if settings.source == "rgb_preview":
                 cam.setPreviewSize(settings.width, settings.height)
                 cam.preview.link(xout.input)
