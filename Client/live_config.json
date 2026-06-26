@@ -3,7 +3,7 @@
     "source": "rgb_preview",
     "width": 640,
     "height": 480,
-    "fps": 6,
+    "fps": 20,
     "warmup_frames": 6
   },
   "perception": {
@@ -23,8 +23,8 @@
     "min_bottom_fraction": 0.45
   },
   "controller": {
-    "base_throttle": 0.028,
-    "min_throttle": 0.02,
+    "base_throttle": 0.05,
+    "min_throttle": 0.04,
     "max_throttle": 0.10,
     "steering_gain": 1.10,
     "avoid_gain": 0.45,

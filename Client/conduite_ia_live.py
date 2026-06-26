@@ -1,13 +1,48 @@
 import argparse
 import json
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
 
+import cv2
+
 from live_driver import LiveDriver
+from live_perception import draw_debug
 from live_settings import DEFAULT_CONFIG, load_settings
 from oak_camera import OakCamera
 from vesc_control import VescController
+
+_stream_lock = threading.Lock()
+_latest_jpeg = b""
+
+
+def _stream_server(port):
+    try:
+        from flask import Flask, Response
+        app = Flask(__name__)
+
+        @app.route("/")
+        def index():
+            return '<h1>Robocar Live</h1><img src="/video">'
+
+        @app.route("/video")
+        def video():
+            def generate():
+                while True:
+                    with _stream_lock:
+                        frame = _latest_jpeg
+                    if frame:
+                        yield (
+                            b"--frame\r\n"
+                            b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+                        )
+                    time.sleep(0.05)
+            return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+        app.run(host="0.0.0.0", port=port, threaded=True)
+    except ImportError:
+        print("[stream] Flask non installe, stream desactive")
 
 
 def parse_args() -> argparse.Namespace:
@@ -15,7 +50,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--dry-run", action="store_true", help="Print commands without opening the VESC.")
     parser.add_argument("--frames", type=int, default=0, help="Stop after N frames. 0 means infinite.")
-    parser.add_argument("--max-fps", type=float, default=3.0)
+    parser.add_argument("--max-fps", type=float, default=10.0)
+    parser.add_argument("--stream", action="store_true", help="Activer le stream camera sur le port 5000.")
+    parser.add_argument("--stream-port", type=int, default=5000)
     parser.add_argument(
         "--camera-source",
         choices=("rgb_preview", "rgb_video", "rgb_isp", "mono_left", "mono_right"),
@@ -25,6 +62,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    global _latest_jpeg
+
     args = parse_args()
     settings = load_settings(args.config)
     if args.camera_source is not None:
@@ -36,11 +75,16 @@ def main() -> None:
     last = time.monotonic()
     frame_idx = 0
 
+    if args.stream:
+        t = threading.Thread(target=_stream_server, args=(args.stream_port,), daemon=True)
+        t.start()
+        print("Stream camera: http://<IP_PI>:{}".format(args.stream_port))
+
     print("IA live demarree")
-    print(f"dry_run={args.dry_run}")
-    print(f"camera_source={settings.camera.source}")
-    print(f"n_rays={settings.perception.n_rays} fov={settings.perception.fov}")
-    print(f"max_throttle={settings.controller.max_throttle}")
+    print("dry_run={}".format(args.dry_run))
+    print("camera_source={}".format(settings.camera.source))
+    print("n_rays={} fov={}".format(settings.perception.n_rays, settings.perception.fov))
+    print("max_throttle={}".format(settings.controller.max_throttle))
 
     try:
         with OakCamera(settings.camera) as camera:
@@ -54,6 +98,13 @@ def main() -> None:
                 if vesc is not None:
                     vesc.set_steering(steering)
                     vesc.set_motor(throttle)
+
+                if args.stream:
+                    debug = draw_debug(result.perception, throttle, steering, result.command.reason)
+                    ok, jpeg = cv2.imencode(".jpg", debug, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    if ok:
+                        with _stream_lock:
+                            _latest_jpeg = jpeg.tobytes()
 
                 print(
                     json.dumps(
