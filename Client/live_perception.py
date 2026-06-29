@@ -32,7 +32,6 @@ class WhiteTapePerception:
 
     def __init__(self, settings: PerceptionSettings) -> None:
         self.settings = settings
-        self._track_width_px: float = 0.0
 
     def predict_mask(self, frame_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         if frame_bgr.ndim != 3 or frame_bgr.shape[2] != 3:
@@ -96,7 +95,7 @@ class WhiteTapePerception:
         return mask, mask_before_filter
 
     @staticmethod
-    def _estimate_track_center(mask, width_hint: float = 0.0):
+    def _estimate_track_center(mask):
         h, w = mask.shape
         if not mask.any():
             return 0.0, 0.0, 0.0, 0.0, tuple()
@@ -108,7 +107,7 @@ class WhiteTapePerception:
 
         sample_ys = np.linspace(y_near, y_far, 9).astype(int)
         center_x = w / 2.0
-        nominal_width = width_hint if width_hint > w * 0.12 else w * 0.58
+        nominal_width = w * 0.58
         min_width = w * 0.18
         max_width = w * 0.92
         previous_center = center_x
@@ -184,39 +183,14 @@ class WhiteTapePerception:
         if len(centers) < 2 or weight_total <= 0.0:
             return 0.0, 0.0, 0.0, nominal_width, tuple()
 
-        center_xs = np.array([c[0] for c in centers], dtype=np.float32)
-        center_ys = np.array([c[1] for c in centers], dtype=np.float32)
-        center_qualities = np.array([c[2] for c in centers], dtype=np.float32)
-        fit_degree = 2 if len(centers) >= 4 else 1
-        fit_weights = np.clip(center_qualities, 0.25, 1.0)
-        fit_coeffs = np.polyfit(center_ys, center_xs, fit_degree, w=fit_weights)
-        fitted_xs = np.polyval(fit_coeffs, center_ys)
-        residual_px = float(
-            np.sqrt(np.average((center_xs - fitted_xs) ** 2, weights=fit_weights))
-        )
-        consistency = float(np.clip(1.0 - residual_px / max(w * 0.16, 1.0), 0.0, 1.0))
-
-        target_center = float(
-            np.average(fitted_xs, weights=fit_weights * (1.0 + 0.35 * center_qualities))
-        )
-        near_y = float(np.median(center_ys[: min(3, len(center_ys))]))
-        far_y = float(np.median(center_ys[max(0, len(center_ys) - 3):]))
-        near = float(np.polyval(fit_coeffs, near_y))
-        far = float(np.polyval(fit_coeffs, far_y))
+        target_center = weighted_sum / weight_total
+        near = np.median([c[0] for c in centers[: min(3, len(centers))]])
+        far = np.median([c[0] for c in centers[max(0, len(centers) - 3):]])
 
         offset = (target_center - center_x) / max(center_x, 1.0)
         heading = (far - near) / max(center_x, 1.0)
-        confidence = min(1.0, quality_total / 6.0) * (0.45 + 0.55 * consistency)
-        strong_pairs = int(np.count_nonzero(center_qualities >= 1.0))
-        if strong_pairs < 2:
-            confidence = min(confidence, 0.45)
-        points = tuple(
-            (
-                int(round(float(np.clip(np.polyval(fit_coeffs, c[1]), 0.0, w - 1.0)))),
-                int(round(c[1])),
-            )
-            for c in centers
-        )
+        confidence = min(1.0, quality_total / 6.0)
+        points = tuple((int(round(c[0])), int(round(c[1]))) for c in centers)
         return (
             float(np.clip(offset, -1.0, 1.0)),
             float(np.clip(heading, -1.0, 1.0)),
@@ -271,15 +245,7 @@ class WhiteTapePerception:
         mask, mask_before_filter = self.predict_mask(frame_bgr)
         rejected = mask_before_filter & ~mask
         raycast = cast_rays(mask, n_rays=self.settings.n_rays, fov=self.settings.fov).astype(np.float32)
-        center_offset, heading, confidence, width_px, points = self._estimate_track_center(
-            mask, self._track_width_px
-        )
-        if confidence > 0.30 and width_px > 0.0:
-            alpha = 0.12 if confidence > 0.55 else 0.04
-            if self._track_width_px > 0.0:
-                self._track_width_px = alpha * width_px + (1.0 - alpha) * self._track_width_px
-            else:
-                self._track_width_px = width_px
+        center_offset, heading, confidence, width_px, points = self._estimate_track_center(mask)
         return PerceptionResult(
             frame_bgr=frame_bgr,
             mask=mask,
