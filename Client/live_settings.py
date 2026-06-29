@@ -15,6 +15,7 @@ class CameraSettings:
     height: int = 480
     fps: int = 6
     warmup_frames: int = 6
+    exposure_compensation: int = 0
 
 
 @dataclass(frozen=True)
