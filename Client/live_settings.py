@@ -44,6 +44,9 @@ class ControllerSettings:
     max_throttle: float = 0.045
     steering_gain: float = 1.10
     avoid_gain: float = 0.45
+    centerline_gain: float = 0.85
+    heading_gain: float = 0.55
+    centerline_blend: float = 0.75
     steering_smoothing: float = 0.35
     steering_time_constant_s: float = 0.25
     throttle_turn_slowdown: float = 0.65

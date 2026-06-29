@@ -24,7 +24,8 @@ def percentile(values: np.ndarray, q: float) -> float:
 
 
 def mask_fraction_for(frame_bgr: np.ndarray, settings: PerceptionSettings) -> float:
-    return float(WhiteTapePerception(settings).predict_mask(frame_bgr).mean())
+    mask, _ = WhiteTapePerception(settings).predict_mask(frame_bgr)
+    return float(mask.mean())
 
 
 def relaxed_settings(settings: PerceptionSettings, value_min: int, sat_max: int, min_rgb: int) -> PerceptionSettings:
@@ -42,6 +43,8 @@ def relaxed_settings(settings: PerceptionSettings, value_min: int, sat_max: int,
         open_iterations=settings.open_iterations,
         dilate_iterations=settings.dilate_iterations,
         min_component_area=settings.min_component_area,
+        max_component_area=settings.max_component_area,
+        min_bottom_fraction=settings.min_bottom_fraction,
     )
 
 
@@ -77,7 +80,14 @@ def main() -> None:
 
     perception = WhiteTapePerception(settings.perception)
     result = perception.process(frame_bgr)
-    command = RaycastLineFollower(settings.controller).predict(result.raycast, result.mask_fraction)
+    command = RaycastLineFollower(settings.controller).predict(
+        result.raycast,
+        result.mask_fraction,
+        ray_fov=result.ray_fov,
+        track_center_offset=result.track_center_offset,
+        track_heading=result.track_heading,
+        track_confidence=result.track_confidence,
+    )
 
     raw_path = args.out_dir / "frame_raw.png"
     debug_path = args.out_dir / "frame_debug.png"

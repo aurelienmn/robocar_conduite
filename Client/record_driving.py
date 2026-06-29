@@ -178,7 +178,11 @@ def _draw_record_debug(result, steering, throttle, count):
     h, w = result.mask.shape
     ox, oy = w / 2.0, h - 1.0
     n_rays = len(result.raycast)
-    angles = np.linspace(0.0, 180.0, n_rays) if n_rays > 1 else np.array([90.0])
+    if n_rays > 1:
+        fov = max(1.0, min(180.0, float(result.ray_fov)))
+        angles = np.arange(n_rays, dtype=np.float32) * (fov / (n_rays - 1)) + (180.0 - fov) / 2.0
+    else:
+        angles = np.array([90.0])
 
     for idx, distance in enumerate(result.raycast):
         rad = math.radians(float(angles[idx]))

@@ -3,7 +3,7 @@
 ```text
 OAK-D Lite camera
   -> Client/live_perception.py      detecte les bandes blanches
-  -> mask-generator cast_rays       calcule 9 raycasts / 180 degres
+  -> mask-generator cast_rays       calcule les raycasts configures
   -> Client/live_controller.py      choisit throttle + steering
   -> Client/vesc_control.py         envoie moteur + servo au VESC
 ```
@@ -102,7 +102,7 @@ python Client/preview_ia_live.py --headless --frames 20 --max-fps 3
 
 Verifier que:
 
-- `raycast` contient 9 valeurs;
+- `raycast` contient le nombre de valeurs configure dans `n_rays`;
 - `mask_fraction` n'est pas toujours 0;
 - `steering` change quand on oriente la voiture vers une bande blanche.
 

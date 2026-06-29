@@ -46,7 +46,16 @@ class RaycastLineFollower:
         self.previous_steering = 0.0
         self.corner_model = CornerModel.load_if_available()
 
-    def predict(self, raycast: np.ndarray, mask_fraction: float, dt_s: Optional[float] = None) -> DriveCommand:
+    def predict(
+        self,
+        raycast: np.ndarray,
+        mask_fraction: float,
+        dt_s: Optional[float] = None,
+        ray_fov: float = 180.0,
+        track_center_offset: float = 0.0,
+        track_heading: float = 0.0,
+        track_confidence: float = 0.0,
+    ) -> DriveCommand:
         distances = np.asarray(raycast, dtype=np.float32).reshape(-1)
         if distances.size == 0 or not np.isfinite(distances).all():
             return self._lost("invalid_raycast")
@@ -59,7 +68,11 @@ class RaycastLineFollower:
 
         n_rays = len(distances)
         middle = n_rays // 2
-        angles = np.linspace(0.0, 180.0, n_rays, dtype=np.float32)
+        if n_rays == 1:
+            angles = np.array([90.0], dtype=np.float32)
+        else:
+            ray_fov = clamp(float(ray_fov), 1.0, 180.0)
+            angles = np.arange(n_rays, dtype=np.float32) * (ray_fov / (n_rays - 1)) + (180.0 - ray_fov) / 2.0
 
         max_distance = max(float(distances.max()), 1.0)
         normalized = np.clip(distances / max_distance, 0.0, 1.0)
@@ -68,19 +81,32 @@ class RaycastLineFollower:
 
         target_idx = int(np.argmax(scores))
         target_angle = float(angles[target_idx])
-        steering = (90.0 - target_angle) / 90.0 * self.settings.steering_gain
+        ray_steering = (90.0 - target_angle) / 90.0 * self.settings.steering_gain
 
         right_clear = float(distances[:middle].mean()) if middle > 0 else max_distance
         left_clear = float(distances[middle + 1 :].mean()) if middle + 1 < n_rays else max_distance
         balance = (left_clear - right_clear) / max(left_clear + right_clear, 1.0)
-        steering -= self.settings.avoid_gain * balance
+        ray_steering -= self.settings.avoid_gain * balance
 
         center_window = distances[max(0, middle - 1) : min(n_rays, middle + 2)]
         front_min = float(center_window.min())
         reason = "target_ray={}".format(target_idx)
 
+        steering = ray_steering
+        track_confidence = clamp(float(track_confidence), 0.0, 1.0)
+        if track_confidence > 0.20:
+            center_offset = clamp(float(track_center_offset), -1.0, 1.0)
+            heading = clamp(float(track_heading), -1.0, 1.0)
+            centerline_steering = (
+                self.settings.centerline_gain * center_offset
+                + self.settings.heading_gain * heading
+            )
+            blend = clamp(self.settings.centerline_blend * track_confidence, 0.0, 1.0)
+            steering = (1.0 - blend) * ray_steering + blend * centerline_steering
+            reason = "centerline(blend={:.2f},ray={})".format(blend, target_idx)
+
         # Blend modele ML en virage serre si disponible
-        if self.corner_model is not None:
+        if self.corner_model is not None and track_confidence < 0.35:
             asymmetry = abs(left_clear - right_clear) / max(left_clear + right_clear, 1.0)
             if asymmetry > 0.45:
                 ml_steering = self.corner_model.predict(distances)
@@ -97,7 +123,14 @@ class RaycastLineFollower:
         steering = clamp(steering, -1.0, 1.0)
         self.previous_steering = steering
 
-        turn_factor = 1.0 - self.settings.throttle_turn_slowdown * abs(steering)
+        curve_intensity = max(
+            abs(steering),
+            track_confidence * (
+                0.45 * abs(float(track_center_offset))
+                + 0.75 * abs(float(track_heading))
+            ),
+        )
+        turn_factor = 1.0 - self.settings.throttle_turn_slowdown * clamp(curve_intensity, 0.0, 1.0)
         throttle = self.settings.base_throttle * clamp(turn_factor, 0.0, 1.0)
         if dt_s is not None and dt_s > self.settings.slow_frame_threshold_s:
             throttle *= clamp(self.settings.slow_frame_threshold_s / dt_s, 0.25, 1.0)
