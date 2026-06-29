@@ -35,6 +35,9 @@ class WhiteTapePerception:
             return np.zeros(frame_bgr.shape[:2], dtype=bool)
 
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        hsv[:, :, 2] = clahe.apply(hsv[:, :, 2])
+
         min_channel = frame_bgr.min(axis=2)
         channel_delta = frame_bgr.max(axis=2) - min_channel
 
