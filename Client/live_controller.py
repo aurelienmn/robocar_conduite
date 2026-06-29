@@ -107,6 +107,32 @@ class RaycastLineFollower:
         center_window = distances[max(0, middle - 1) : min(n_rays, middle + 2)]
         front_min = float(center_window.min())
         reason = "target_ray={}".format(target_idx)
+        boundary_distance = max(float(self.settings.boundary_avoidance_distance_px), 1.0)
+        boundary_closeness = np.clip((boundary_distance - distances) / boundary_distance, 0.0, 1.0)
+        if n_rays > navigation_margin * 2 + 1:
+            boundary_closeness[:navigation_margin] *= 0.45
+            boundary_closeness[n_rays - navigation_margin:] *= 0.45
+        side_sign = np.sign(angles - 90.0)
+        forward_weight = 1.0 - 0.45 * np.abs(angles - 90.0) / 90.0
+        pressure = boundary_closeness * forward_weight
+        left_mask = side_sign > 0.0
+        right_mask = side_sign < 0.0
+        if left_mask.any():
+            left_avg = pressure[left_mask].sum() / max(float(forward_weight[left_mask].sum()), 1e-6)
+            left_pressure = float(0.65 * pressure[left_mask].max() + 0.35 * left_avg)
+        else:
+            left_pressure = 0.0
+        if right_mask.any():
+            right_avg = pressure[right_mask].sum() / max(float(forward_weight[right_mask].sum()), 1e-6)
+            right_pressure = float(0.65 * pressure[right_mask].max() + 0.35 * right_avg)
+        else:
+            right_pressure = 0.0
+        boundary_avoidance_max = max(float(self.settings.boundary_avoidance_max_steering), 0.0)
+        boundary_avoidance = clamp(
+            (left_pressure - right_pressure) * float(self.settings.boundary_avoidance_gain),
+            -boundary_avoidance_max,
+            boundary_avoidance_max,
+        )
 
         steering = ray_steering
         fast_response = False
@@ -123,6 +149,13 @@ class RaycastLineFollower:
             centerline_blend = clamp(self.settings.centerline_blend * track_confidence, 0.0, 1.0)
             steering = (1.0 - centerline_blend) * ray_steering + centerline_blend * centerline_steering
             reason = "centerline(blend={:.2f},ray={})".format(centerline_blend, target_idx)
+
+        if abs(boundary_avoidance) > 0.02:
+            steering = clamp(steering + boundary_avoidance, -1.0, 1.0)
+            if abs(boundary_avoidance) > 0.12:
+                reason = "boundary_avoidance"
+            if abs(boundary_avoidance) > 0.20:
+                fast_response = True
 
         guard_distance = max(float(self.settings.boundary_guard_distance_px), 1.0)
         guard_steering = clamp(float(self.settings.boundary_guard_steering), 0.0, 1.0)
@@ -241,6 +274,10 @@ class RaycastLineFollower:
             "left_min": float(left_min),
             "right_min": float(right_min),
             "front_min": float(front_min),
+            "boundary_avoidance": float(boundary_avoidance),
+            "left_pressure": float(left_pressure),
+            "right_pressure": float(right_pressure),
+            "boundary_avoidance_distance": float(boundary_distance),
             "anticipation_active": bool(anticipation_active),
             "anticipation_distance": float(anticipation_distance),
             "track_center": float(center_offset),
