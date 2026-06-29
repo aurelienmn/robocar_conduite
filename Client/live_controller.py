@@ -41,6 +41,7 @@ class RaycastLineFollower:
         self.previous_steering = 0.0
         self.emergency_hold_remaining_s = 0.0
         self.emergency_steering = 0.0
+        self._lost_frames = 0
 
     def predict(
         self,
@@ -62,6 +63,7 @@ class RaycastLineFollower:
         if mask_fraction < self.settings.lost_mask_fraction:
             return self._lost("line_lost")
 
+        self._lost_frames = 0
         n_rays = len(distances)
         middle = n_rays // 2
         dt_step = 0.10 if dt_s is None else max(float(dt_s), 0.0)
@@ -181,11 +183,17 @@ class RaycastLineFollower:
         anticipation_distance = max(float(self.settings.turn_anticipation_distance_px), 1.0)
         anticipation_steering = clamp(float(self.settings.turn_anticipation_steering), 0.0, 1.0)
         anticipation_active = front_min < anticipation_distance
+        anticipation_proximity = clamp(1.0 - front_min / anticipation_distance, 0.0, 1.0) if anticipation_active else 0.0
         if anticipation_active:
             fast_response = True
             reason = "turn_anticipation"
-            if abs(steering) < anticipation_steering:
-                if abs(steering) > 0.05:
+            min_anticipation_steer = anticipation_steering * clamp(0.55 + 0.45 * anticipation_proximity, 0.55, 1.0)
+            if abs(steering) < min_anticipation_steer:
+                if abs(boundary_avoidance) > 0.06:
+                    direction = 1.0 if boundary_avoidance > 0.0 else -1.0
+                elif centerline_steering is not None and abs(centerline_steering) > 0.06:
+                    direction = 1.0 if centerline_steering > 0.0 else -1.0
+                elif abs(steering) > 0.05:
                     direction = 1.0 if steering > 0.0 else -1.0
                 elif track_confidence > 0.20 and abs(heading) > 0.05:
                     direction = 1.0 if heading > 0.0 else -1.0
@@ -198,7 +206,7 @@ class RaycastLineFollower:
                 else:
                     direction = 0.0
                 if direction != 0.0:
-                    steering = direction * anticipation_steering
+                    steering = direction * min_anticipation_steer
 
         emergency_side = None
         if front_min < self.settings.emergency_distance_px:
@@ -241,18 +249,37 @@ class RaycastLineFollower:
                 + 0.75 * abs(float(track_heading))
             ),
         )
+        boundary_pressure_peak = max(left_pressure, right_pressure)
         turn_factor = 1.0 - self.settings.throttle_turn_slowdown * clamp(curve_intensity, 0.0, 1.0)
         throttle = self.settings.base_throttle * clamp(turn_factor, 0.0, 1.0)
         throttle_before_slow_frame = throttle
         if dt_s is not None and dt_s > self.settings.slow_frame_threshold_s:
             throttle *= clamp(self.settings.slow_frame_threshold_s / dt_s, 0.25, 1.0)
-        if anticipation_active:
-            throttle = min(
-                throttle,
-                self.settings.base_throttle
-                * clamp(float(self.settings.turn_anticipation_throttle_scale), 0.0, 1.0),
+        boundary_throttle_scale = 1.0
+        recovery_throttle = clamp(float(self.settings.recovery_throttle), 0.0, self.settings.max_throttle)
+        hard_stop_distance = max(float(self.settings.hard_stop_distance_px), 1.0)
+        recovery_active = False
+        hard_stop_active = min(closest_side, front_min) < hard_stop_distance
+        if boundary_pressure_peak > 0.18:
+            boundary_throttle_scale = 1.0 - 0.80 * clamp(
+                (boundary_pressure_peak - 0.18) / 0.55,
+                0.0,
+                1.0,
             )
+            throttle = min(throttle, self.settings.base_throttle * boundary_throttle_scale)
+            if boundary_pressure_peak > 0.32:
+                recovery_active = True
+        if anticipation_active:
+            effective_scale = clamp(float(self.settings.turn_anticipation_throttle_scale), 0.0, 1.0)
+            gradual_scale = 1.0 - (1.0 - effective_scale) * anticipation_proximity
+            throttle = min(throttle, self.settings.base_throttle * gradual_scale)
+        if closest_side < guard_distance:
+            recovery_active = True
         if front_min < self.settings.emergency_distance_px:
+            recovery_active = True
+        if recovery_active and not hard_stop_active:
+            throttle = recovery_throttle
+        if hard_stop_active:
             throttle = min(throttle, self.settings.min_throttle)
         throttle = clamp(throttle, self.settings.min_throttle, self.settings.max_throttle)
 
@@ -277,6 +304,7 @@ class RaycastLineFollower:
             "boundary_avoidance": float(boundary_avoidance),
             "left_pressure": float(left_pressure),
             "right_pressure": float(right_pressure),
+            "boundary_pressure_peak": float(boundary_pressure_peak),
             "boundary_avoidance_distance": float(boundary_distance),
             "anticipation_active": bool(anticipation_active),
             "anticipation_distance": float(anticipation_distance),
@@ -297,6 +325,11 @@ class RaycastLineFollower:
             "pre_smooth_steering": float(pre_smooth_steering),
             "curve_intensity": float(curve_intensity),
             "turn_factor": float(turn_factor),
+            "boundary_throttle_scale": float(boundary_throttle_scale),
+            "recovery_active": bool(recovery_active),
+            "recovery_throttle": float(recovery_throttle),
+            "hard_stop_active": bool(hard_stop_active),
+            "hard_stop_distance": float(hard_stop_distance),
             "throttle_before_slow_frame": float(throttle_before_slow_frame),
         }
         return DriveCommand(
@@ -313,12 +346,20 @@ class RaycastLineFollower:
         return clamp(dt_s / (self.settings.steering_time_constant_s + dt_s), 0.0, 1.0)
 
     def _lost(self, reason: str) -> DriveCommand:
-        steering = self.previous_steering * 0.8
+        self._lost_frames += 1
+        recovery_window = 6  # ~0.3s a 20fps
+        if self._lost_frames <= recovery_window:
+            decay = max(1.0 - 0.12 * self._lost_frames, 0.3)
+            steering = self.previous_steering * decay
+            throttle = self.settings.recovery_throttle * 0.45
+        else:
+            steering = self.previous_steering * 0.3
+            throttle = self.settings.lost_line_throttle
         self.previous_steering = steering
         return DriveCommand(
-            throttle=self.settings.lost_line_throttle,
+            throttle=throttle,
             steering=steering,
             confidence=0.0,
             reason=reason,
-            diagnostics={"lost_reason": reason},
+            diagnostics={"lost_reason": reason, "lost_frames": self._lost_frames},
         )
