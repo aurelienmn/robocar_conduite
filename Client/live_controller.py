@@ -85,6 +85,8 @@ class RaycastLineFollower:
 
         right_clear = float(distances[:middle].mean()) if middle > 0 else max_distance
         left_clear = float(distances[middle + 1 :].mean()) if middle + 1 < n_rays else max_distance
+        right_min = float(distances[:middle].min()) if middle > 0 else max_distance
+        left_min = float(distances[middle + 1 :].min()) if middle + 1 < n_rays else max_distance
         balance = (left_clear - right_clear) / max(left_clear + right_clear, 1.0)
         ray_steering -= self.settings.avoid_gain * balance
 
@@ -93,6 +95,7 @@ class RaycastLineFollower:
         reason = "target_ray={}".format(target_idx)
 
         steering = ray_steering
+        fast_response = False
         track_confidence = clamp(float(track_confidence), 0.0, 1.0)
         if track_confidence > 0.20:
             center_offset = clamp(float(track_center_offset), -1.0, 1.0)
@@ -114,11 +117,29 @@ class RaycastLineFollower:
                 steering = (1.0 - blend) * steering + blend * ml_steering
                 reason = "ml_corner(blend={:.2f})".format(blend)
 
+        guard_distance = max(float(self.settings.boundary_guard_distance_px), 1.0)
+        guard_steering = clamp(float(self.settings.boundary_guard_steering), 0.0, 1.0)
+        closest_side = min(left_min, right_min)
+        if closest_side < guard_distance:
+            proximity = clamp((guard_distance - closest_side) / guard_distance, 0.0, 1.0)
+            forced = guard_steering * (0.55 + 0.45 * proximity)
+            if right_min < left_min * 0.92:
+                steering = min(steering, -forced)
+                reason = "boundary_guard_right"
+                fast_response = True
+            elif left_min < right_min * 0.92:
+                steering = max(steering, forced)
+                reason = "boundary_guard_left"
+                fast_response = True
+
         if front_min < self.settings.emergency_distance_px:
             steering = -0.85 if left_clear > right_clear else 0.85
             reason = "emergency_avoid"
+            fast_response = True
 
         smoothing = self._steering_alpha(dt_s)
+        if fast_response:
+            smoothing = max(smoothing, 0.70)
         steering = self.previous_steering + smoothing * (steering - self.previous_steering)
         steering = clamp(steering, -1.0, 1.0)
         self.previous_steering = steering
