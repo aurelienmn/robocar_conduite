@@ -164,11 +164,11 @@ class Xbox360(Gamepad):
     def __init__(self, joystickNumber = 0):
         Gamepad.__init__(self, joystickNumber)
         self.axisNames = {
-            0: 'LEFT-X',
-            1: 'LEFT-Y',
+            0: 'LX',
+            1: 'LY',
             2: 'LT',
-            3: 'RIGHT-X',
-            4: 'RIGHT-Y',
+            3: 'RX',
+            4: 'RY',
             5: 'RT'
         }
         self.buttonNames = {
