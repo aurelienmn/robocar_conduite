@@ -21,7 +21,7 @@
     "dilate_iterations": 0,
     "min_component_area": 150,
     "max_component_area": 20000,
-    "min_bottom_fraction": 0.45
+    "min_bottom_fraction": 0.30
   },
   "controller": {
     "base_throttle": 0.05,
@@ -31,12 +31,12 @@
     "avoid_gain": 0.45,
     "steering_smoothing": 0.35,
     "steering_time_constant_s": 0.25,
-    "throttle_turn_slowdown": 0.65,
+    "throttle_turn_slowdown": 0.45,
     "slow_frame_threshold_s": 0.45,
     "stale_frame_timeout_s": 1.20,
     "emergency_distance_px": 45,
     "lost_mask_fraction": 0.0008,
-    "lost_line_throttle": 0.0
+    "lost_line_throttle": 0.03
   },
   "vesc": {
     "port": "/dev/ttyACM0",
