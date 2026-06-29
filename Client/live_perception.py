@@ -79,7 +79,6 @@ class WhiteTapePerception:
                 self.settings.min_component_area,
                 self.settings.max_component_area,
                 self.settings.min_bottom_fraction,
-                self.settings.n_closest,
             )
 
         return mask, mask_before_filter

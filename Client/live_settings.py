@@ -15,7 +15,6 @@ class CameraSettings:
     height: int = 480
     fps: int = 6
     warmup_frames: int = 6
-    exposure_compensation: int = 0
 
 
 @dataclass(frozen=True)
@@ -35,7 +34,6 @@ class PerceptionSettings:
     min_component_area: int = 350
     max_component_area: int = 20000
     min_bottom_fraction: float = 0.45
-    n_closest: int = 2
 
 
 @dataclass(frozen=True)
