@@ -47,8 +47,14 @@ class ControllerSettings:
     centerline_gain: float = 0.85
     heading_gain: float = 0.55
     centerline_blend: float = 0.75
+    navigation_margin_rays: int = 2
+    turn_anticipation_distance_px: float = 170.0
+    turn_anticipation_steering: float = 0.55
+    turn_anticipation_throttle_scale: float = 0.72
     boundary_guard_distance_px: float = 105.0
     boundary_guard_steering: float = 0.62
+    emergency_hold_s: float = 0.35
+    emergency_switch_ratio: float = 1.55
     steering_smoothing: float = 0.35
     steering_time_constant_s: float = 0.25
     throttle_turn_slowdown: float = 0.65

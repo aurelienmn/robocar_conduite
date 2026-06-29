@@ -39,6 +39,8 @@ class RaycastLineFollower:
     def __init__(self, settings: ControllerSettings) -> None:
         self.settings = settings
         self.previous_steering = 0.0
+        self.emergency_hold_remaining_s = 0.0
+        self.emergency_steering = 0.0
 
     def predict(
         self,
@@ -62,6 +64,8 @@ class RaycastLineFollower:
 
         n_rays = len(distances)
         middle = n_rays // 2
+        dt_step = 0.10 if dt_s is None else max(float(dt_s), 0.0)
+        self.emergency_hold_remaining_s = max(0.0, self.emergency_hold_remaining_s - dt_step)
         if n_rays == 1:
             angles = np.array([90.0], dtype=np.float32)
         else:
@@ -73,7 +77,14 @@ class RaycastLineFollower:
         forward_bias = 1.0 - 0.10 * np.abs(angles - 90.0) / 90.0
         scores = normalized * forward_bias
 
-        target_idx = int(np.argmax(scores))
+        navigation_margin = int(max(0, self.settings.navigation_margin_rays))
+        if n_rays > navigation_margin * 2 + 1:
+            nav_scores = scores.copy()
+            nav_scores[:navigation_margin] = -1.0
+            nav_scores[n_rays - navigation_margin:] = -1.0
+            target_idx = int(np.argmax(nav_scores))
+        else:
+            target_idx = int(np.argmax(scores))
         target_angle = float(angles[target_idx])
         ray_steering = (90.0 - target_angle) / 90.0 * self.settings.steering_gain
         ray_steering_before_balance = ray_steering
@@ -82,6 +93,14 @@ class RaycastLineFollower:
         left_clear = float(distances[middle + 1 :].mean()) if middle + 1 < n_rays else max_distance
         right_min = float(distances[:middle].min()) if middle > 0 else max_distance
         left_min = float(distances[middle + 1 :].min()) if middle + 1 < n_rays else max_distance
+        right_emergency_rays = distances[1:middle] if middle > 2 else distances[:middle]
+        left_emergency_rays = distances[middle + 1 : -1] if middle + 2 < n_rays else distances[middle + 1 :]
+        right_emergency_clear = (
+            float(np.median(right_emergency_rays)) if right_emergency_rays.size else right_clear
+        )
+        left_emergency_clear = (
+            float(np.median(left_emergency_rays)) if left_emergency_rays.size else left_clear
+        )
         balance = (left_clear - right_clear) / max(left_clear + right_clear, 1.0)
         ray_steering -= self.settings.avoid_gain * balance
 
@@ -126,16 +145,57 @@ class RaycastLineFollower:
                 guard_side = "left"
                 guard_forced_steering = forced
 
+        anticipation_distance = max(float(self.settings.turn_anticipation_distance_px), 1.0)
+        anticipation_steering = clamp(float(self.settings.turn_anticipation_steering), 0.0, 1.0)
+        anticipation_active = front_min < anticipation_distance
+        if anticipation_active:
+            fast_response = True
+            reason = "turn_anticipation"
+            if abs(steering) < anticipation_steering:
+                if abs(steering) > 0.05:
+                    direction = 1.0 if steering > 0.0 else -1.0
+                elif track_confidence > 0.20 and abs(heading) > 0.05:
+                    direction = 1.0 if heading > 0.0 else -1.0
+                elif left_min < right_min:
+                    direction = 1.0
+                elif right_min < left_min:
+                    direction = -1.0
+                elif abs(self.previous_steering) > 0.05:
+                    direction = 1.0 if self.previous_steering > 0.0 else -1.0
+                else:
+                    direction = 0.0
+                if direction != 0.0:
+                    steering = direction * anticipation_steering
+
         emergency_side = None
         if front_min < self.settings.emergency_distance_px:
-            steering = -0.85 if left_clear > right_clear else 0.85
+            switch_ratio = max(float(self.settings.emergency_switch_ratio), 1.0)
+            if left_emergency_clear > right_emergency_clear * switch_ratio:
+                steering = -0.85
+                emergency_side = "right"
+            elif right_emergency_clear > left_emergency_clear * switch_ratio:
+                steering = 0.85
+                emergency_side = "left"
+            elif self.emergency_hold_remaining_s > 0.0 and self.emergency_steering != 0.0:
+                steering = self.emergency_steering
+                emergency_side = "hold"
+            elif abs(self.previous_steering) > 0.12:
+                steering = 0.85 if self.previous_steering > 0.0 else -0.85
+                emergency_side = "previous"
+            elif left_emergency_clear > right_emergency_clear:
+                steering = -0.85
+                emergency_side = "right"
+            else:
+                steering = 0.85
+                emergency_side = "left"
+            self.emergency_steering = steering
+            self.emergency_hold_remaining_s = max(float(self.settings.emergency_hold_s), 0.0)
             reason = "emergency_avoid"
             fast_response = True
-            emergency_side = "right" if left_clear > right_clear else "left"
 
         smoothing = self._steering_alpha(dt_s)
         if fast_response:
-            smoothing = max(smoothing, 0.70)
+            smoothing = max(smoothing, 0.90)
         pre_smooth_steering = steering
         steering = self.previous_steering + smoothing * (steering - self.previous_steering)
         steering = clamp(steering, -1.0, 1.0)
@@ -153,6 +213,12 @@ class RaycastLineFollower:
         throttle_before_slow_frame = throttle
         if dt_s is not None and dt_s > self.settings.slow_frame_threshold_s:
             throttle *= clamp(self.settings.slow_frame_threshold_s / dt_s, 0.25, 1.0)
+        if anticipation_active:
+            throttle = min(
+                throttle,
+                self.settings.base_throttle
+                * clamp(float(self.settings.turn_anticipation_throttle_scale), 0.0, 1.0),
+            )
         if front_min < self.settings.emergency_distance_px:
             throttle = min(throttle, self.settings.min_throttle)
         throttle = clamp(throttle, self.settings.min_throttle, self.settings.max_throttle)
@@ -161,6 +227,7 @@ class RaycastLineFollower:
         diagnostics = {
             "n_rays": int(n_rays),
             "ray_fov": float(ray_fov),
+            "navigation_margin_rays": int(navigation_margin),
             "target_idx": int(target_idx),
             "target_angle": float(target_angle),
             "target_distance": float(distances[target_idx]),
@@ -169,9 +236,13 @@ class RaycastLineFollower:
             "balance": float(balance),
             "left_clear": float(left_clear),
             "right_clear": float(right_clear),
+            "left_emergency_clear": float(left_emergency_clear),
+            "right_emergency_clear": float(right_emergency_clear),
             "left_min": float(left_min),
             "right_min": float(right_min),
             "front_min": float(front_min),
+            "anticipation_active": bool(anticipation_active),
+            "anticipation_distance": float(anticipation_distance),
             "track_center": float(center_offset),
             "track_heading": float(heading),
             "track_confidence": float(track_confidence),
@@ -183,6 +254,7 @@ class RaycastLineFollower:
                 None if guard_forced_steering is None else float(guard_forced_steering)
             ),
             "emergency_side": emergency_side,
+            "emergency_hold_remaining_s": float(self.emergency_hold_remaining_s),
             "fast_response": bool(fast_response),
             "smoothing": float(smoothing),
             "pre_smooth_steering": float(pre_smooth_steering),

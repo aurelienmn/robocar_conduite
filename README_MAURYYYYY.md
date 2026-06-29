@@ -49,6 +49,13 @@ logs/ia_runs/YYYYMMDD_HHMMSS_live/
 
 Pour un test sans moteurs, le suffixe sera `_dry`.
 
+Pour obtenir un resume court copiable depuis SSH:
+
+```bash
+python3 Client/analyze_ia_run.py logs/ia_runs/YYYYMMDD_HHMMSS_live > analyse.txt
+cat analyse.txt
+```
+
 ---
 
 ## Reglages - tout est dans live_config.json
