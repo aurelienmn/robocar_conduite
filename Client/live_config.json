@@ -31,12 +31,12 @@
     "avoid_gain": 0.45,
     "steering_smoothing": 0.35,
     "steering_time_constant_s": 0.25,
-    "throttle_turn_slowdown": 0.45,
+    "throttle_turn_slowdown": 0.65,
     "slow_frame_threshold_s": 0.45,
     "stale_frame_timeout_s": 1.20,
     "emergency_distance_px": 45,
     "lost_mask_fraction": 0.0008,
-    "lost_line_throttle": 0.03
+    "lost_line_throttle": 0.0
   },
   "vesc": {
     "port": "/dev/ttyACM0",
@@ -44,8 +44,8 @@
     "max_duty": 0.08,
     "deadzone": 0.03,
     "servo_center": 0.50,
-    "servo_range": 0.30,
-    "servo_min": 0.20,
-    "servo_max": 0.80
+    "servo_range": 0.38,
+    "servo_min": 0.12,
+    "servo_max": 0.88
   }
 }
