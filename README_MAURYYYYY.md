@@ -38,23 +38,16 @@ Oriente la voiture a la main, les logs doivent afficher `steering` qui change.
 python3 conduite_ia_live.py
 ```
 
----
+Chaque lancement cree automatiquement un dossier de logs:
 
-## 4. Si les virages sont problematiques - activer le modele ML
-
-```bash
-# 1. Enregistrer des tours manuels avec la manette
-python3 enregistrer_donnees_reelles.py
-
-# 2. Entrainer le modele directement sur la Pi (c'est petit ca devrai aller)
-#    Le nom du dossier run_XXXX est affiche dans le terminal a l'etape 1
-cd ..
-python3 train_corner_model.py data/real/run_XXXXXXXX
-
-# 3. Relancer la voiture -> mode hybride active automatiquement
-cd Client
-python3 conduite_ia_live.py
+```text
+logs/ia_runs/YYYYMMDD_HHMMSS_live/
+  config.json
+  events.jsonl
+  summary.json
 ```
+
+Pour un test sans moteurs, le suffixe sera `_dry`.
 
 ---
 
@@ -64,12 +57,13 @@ python3 conduite_ia_live.py
 |---|---|---|
 | Trop rapide | `base_throttle` | Baisser (ex: 0.022) |
 | Trop lent | `base_throttle` | Augmenter (ex: 0.035) |
-| Vire trop peu | `steering_gain` | Augmenter (ex: 1.4) |
-| Vire trop fort | `steering_gain` | Baisser (ex: 0.8) |
+| Vire trop peu au centre de piste | `centerline_gain` / `heading_gain` | Augmenter legerement |
+| Evite trop tard une bande proche | `boundary_guard_distance_px` | Augmenter |
+| Evite trop fort une bande proche | `boundary_guard_steering` | Baisser |
+| Raycast fallback vire trop peu | `steering_gain` | Augmenter legerement |
 | Conduite saccadee | `steering_smoothing` | Augmenter (ex: 0.5) |
 | Freine trop en virage | `throttle_turn_slowdown` | Baisser (ex: 0.4) |
 | Decor detecte en rouge | `min_bottom_fraction` | Augmenter (ex: 0.55) |
 | Bandes non vues de loin | `roi_top_fraction` | Baisser (ex: 0.10) |
 
 Apres chaque modif -> relancer `python3 conduite_ia_live.py`.
-

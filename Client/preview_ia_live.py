@@ -56,6 +56,10 @@ def main() -> None:
                     "camera_source": settings.camera.source,
                     "fps": None if result.dt_s is None else 1.0 / max(result.dt_s, 1e-6),
                     "mask_fraction": result.perception.mask_fraction,
+                    "track_center": result.perception.track_center_offset,
+                    "track_heading": result.perception.track_heading,
+                    "track_confidence": result.perception.track_confidence,
+                    "ray_fov": result.perception.ray_fov,
                     "raycast": [int(v) for v in result.perception.raycast],
                 }
 

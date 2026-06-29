@@ -107,49 +107,73 @@ class WhiteTapePerception:
 
         sample_ys = np.linspace(y_near, y_far, 9).astype(int)
         center_x = w / 2.0
-        split_margin = max(8, int(w * 0.04))
-
-        edge_rows = []
+        nominal_width = w * 0.58
+        min_width = w * 0.18
+        max_width = w * 0.92
+        previous_center = center_x
         widths = []
-        for y in sample_ys:
-            band = mask[max(0, y - 2): min(h, y + 3), :]
-            cols = np.flatnonzero(band.any(axis=0))
+
+        def contiguous_runs(cols):
             if cols.size == 0:
-                edge_rows.append((int(y), None, None))
-                continue
+                return []
+            split_at = np.flatnonzero(np.diff(cols) > 1) + 1
+            groups = np.split(cols, split_at)
+            return [
+                (float(group[0]), float(group[-1]))
+                for group in groups
+                if group.size >= 3
+            ]
 
-            left_cols = cols[cols < center_x - split_margin]
-            right_cols = cols[cols > center_x + split_margin]
-            left_x = float(left_cols.max()) if left_cols.size else None
-            right_x = float(right_cols.min()) if right_cols.size else None
-            if left_x is not None and right_x is not None and right_x > left_x:
-                width = right_x - left_x
-                if width > w * 0.18:
-                    widths.append(width)
-            edge_rows.append((int(y), left_x, right_x))
-
-        nominal_width = float(np.median(widths)) if widths else w * 0.58
         centers = []
         weighted_sum = 0.0
         weight_total = 0.0
         quality_total = 0.0
 
-        for idx, (y, left_x, right_x) in enumerate(edge_rows):
-            quality = 0.0
-            if left_x is not None and right_x is not None and right_x > left_x:
-                center = (left_x + right_x) * 0.5
-                quality = 1.0
-            elif left_x is not None:
-                center = left_x + nominal_width * 0.5
-                quality = 0.45
-            elif right_x is not None:
-                center = right_x - nominal_width * 0.5
-                quality = 0.45
-            else:
+        for idx, y in enumerate(sample_ys):
+            band = mask[max(0, y - 2): min(h, y + 3), :]
+            cols = np.flatnonzero(band.any(axis=0))
+            runs = contiguous_runs(cols)
+            if not runs:
                 continue
 
+            if widths:
+                nominal_width = float(np.median(widths[-5:]))
+
+            candidates = []
+            for left_idx, left_run in enumerate(runs[:-1]):
+                for right_run in runs[left_idx + 1:]:
+                    width = right_run[0] - left_run[1]
+                    if min_width <= width <= max_width:
+                        center = (left_run[1] + right_run[0]) * 0.5
+                        score = abs(center - previous_center) + 0.25 * abs(width - nominal_width)
+                        candidates.append((score, center, width, 1.0))
+
+            for start_x, end_x in runs:
+                left_edge_center = end_x + nominal_width * 0.5
+                if 0.0 <= left_edge_center < w:
+                    score = abs(left_edge_center - previous_center) + 0.45 * nominal_width
+                    candidates.append((score, left_edge_center, nominal_width, 0.45))
+
+                right_edge_center = start_x - nominal_width * 0.5
+                if 0.0 <= right_edge_center < w:
+                    score = abs(right_edge_center - previous_center) + 0.45 * nominal_width
+                    candidates.append((score, right_edge_center, nominal_width, 0.45))
+
+            if not candidates:
+                continue
+
+            _, center, width, quality = min(candidates, key=lambda c: c[0])
+            if centers and quality < 1.0 and abs(center - previous_center) > w * 0.32:
+                continue
+
+            smooth = 0.72 if quality >= 1.0 else 0.45
+            center = smooth * center + (1.0 - smooth) * previous_center
             center = float(np.clip(center, 0.0, w - 1.0))
-            progress = idx / max(len(edge_rows) - 1, 1)
+            previous_center = center
+            if quality >= 1.0:
+                widths.append(float(width))
+
+            progress = idx / max(len(sample_ys) - 1, 1)
             weight = quality * (1.0 + 0.8 * progress)
             weighted_sum += center * weight
             weight_total += weight
@@ -265,6 +289,16 @@ def draw_debug(result: PerceptionResult, throttle: float, steering: float, reaso
         cv2.polylines(frame, [pts], False, (0, 255, 0), 2, cv2.LINE_AA)
         for point in result.track_points:
             cv2.circle(frame, point, 3, (0, 255, 0), -1)
+        if len(result.track_points) >= 2:
+            cv2.arrowedLine(
+                frame,
+                result.track_points[0],
+                result.track_points[-1],
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA,
+                tipLength=0.18,
+            )
 
     cv2.putText(
         frame,

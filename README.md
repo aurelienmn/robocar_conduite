@@ -151,7 +151,7 @@ La config par defaut est volontairement prudente pour une Jetson autour de 2-3 F
 Pour le jour J, garder `--max-fps 3` et monter `max_throttle` seulement quand le masque
 detecte correctement les bandes blanches.
 
-## Enregistrer des donnees reelles pour entrainer ensuite
+## Enregistrer des donnees reelles pour diagnostic
 
 Pendant une conduite manuelle sur la vraie piste:
 

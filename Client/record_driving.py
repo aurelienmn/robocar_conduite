@@ -7,8 +7,7 @@ Usage:
     python3 record_driving.py --output data_circuit.csv --stream    # avec camera live
 
 Conduis normalement avec la manette. Appuie sur START pour arreter.
-Les donnees (raycasts + ton braquage) sont sauvegardees dans le CSV.
-Ensuite utilise train_corner_model.py pour entrainer le modele.
+Les donnees (raycasts + ton braquage) sont sauvegardees dans le CSV pour diagnostic.
 """
 import argparse
 import csv
