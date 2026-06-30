@@ -48,7 +48,7 @@
     "port": "/dev/ttyACM0",
     "baudrate": 115200,
     "max_duty": 0.08,
-    "deadzone": 0.03,
+    "deadzone": 0.02,
     "servo_center": 0.50,
     "servo_range": 0.38,
     "servo_min": 0.12,
