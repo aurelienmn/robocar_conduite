@@ -533,7 +533,10 @@ def run_record(args: argparse.Namespace) -> None:
                 rt = normalize_trigger(safe_axis(gamepad, rt_axes))
                 lt = normalize_trigger(safe_axis(gamepad, lt_axes))
                 throttle = clamp(rt - lt, -1.0, 1.0)
-                throttle_duty = max(0.0, throttle) * settings.vesc.max_duty
+                if throttle >= 0.0:
+                    throttle_duty = throttle * settings.vesc.max_duty
+                else:
+                    throttle_duty = throttle * settings.vesc.max_duty * args.brake_scale
 
                 if vesc is not None:
                     vesc.set_steering(steering)
@@ -1475,6 +1478,7 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--steering-axis", default="LX,LEFT-X,0")
     record.add_argument("--throttle-axis", default="RT,R2,5")
     record.add_argument("--brake-axis", default="LT,L2,2")
+    record.add_argument("--brake-scale", type=float, default=1.0)
     record.add_argument("--light-augments", type=int, default=1)
     record.add_argument("--seed", type=int, default=123)
     record.add_argument("--max-fps", type=float, default=20.0)
