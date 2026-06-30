@@ -1,9 +1,10 @@
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Optional
 
 import numpy as np
 
 from live_settings import ControllerSettings
+from corner_model import CornerModel
 
 
 @dataclass(frozen=True)
@@ -12,7 +13,6 @@ class DriveCommand:
     steering: float
     confidence: float
     reason: str
-    diagnostics: Dict[str, Any]
 
 
 def clamp(value: float, min_value: float, max_value: float) -> float:
@@ -25,6 +25,11 @@ class RaycastLineFollower:
 
     Convention rayons :
       ray 0 = droite extreme, ray central = devant, dernier ray = gauche extreme
+
+    Mode hybride :
+      Si corner_model_weights.npz est present dans Client/,
+      le modele ML prend progressivement le relais dans les virages serres.
+      Sinon, l'algo seul est utilise (pas d'erreur).
 
     Parametres cles dans live_config.json (section controller) :
       base_throttle        : vitesse normale (augmenter si trop lent)
@@ -39,24 +44,9 @@ class RaycastLineFollower:
     def __init__(self, settings: ControllerSettings) -> None:
         self.settings = settings
         self.previous_steering = 0.0
-        self.previous_throttle = 0.0
-        self.emergency_hold_remaining_s = 0.0
-        self.emergency_steering = 0.0
-        self.turn_memory_remaining_s = 0.0
-        self.turn_memory_steering = 0.0
-        self._smoothed_asymmetry = 0.0
-        self._lost_frames = 0
+        self.corner_model = CornerModel.load_if_available()
 
-    def predict(
-        self,
-        raycast: np.ndarray,
-        mask_fraction: float,
-        dt_s: Optional[float] = None,
-        ray_fov: float = 180.0,
-        track_center_offset: float = 0.0,
-        track_heading: float = 0.0,
-        track_confidence: float = 0.0,
-    ) -> DriveCommand:
+    def predict(self, raycast: np.ndarray, mask_fraction: float, dt_s: Optional[float] = None) -> DriveCommand:
         distances = np.asarray(raycast, dtype=np.float32).reshape(-1)
         if distances.size == 0 or not np.isfinite(distances).all():
             return self._lost("invalid_raycast")
@@ -67,361 +57,56 @@ class RaycastLineFollower:
         if mask_fraction < self.settings.lost_mask_fraction:
             return self._lost("line_lost")
 
-        self._lost_frames = 0
         n_rays = len(distances)
         middle = n_rays // 2
-        dt_step = 0.10 if dt_s is None else max(float(dt_s), 0.0)
-        self.emergency_hold_remaining_s = max(0.0, self.emergency_hold_remaining_s - dt_step)
-        self.turn_memory_remaining_s = max(0.0, self.turn_memory_remaining_s - dt_step)
-        if n_rays == 1:
-            angles = np.array([90.0], dtype=np.float32)
-        else:
-            ray_fov = clamp(float(ray_fov), 1.0, 180.0)
-            angles = np.arange(n_rays, dtype=np.float32) * (ray_fov / (n_rays - 1)) + (180.0 - ray_fov) / 2.0
+        angles = np.linspace(0.0, 180.0, n_rays, dtype=np.float32)
 
         max_distance = max(float(distances.max()), 1.0)
         normalized = np.clip(distances / max_distance, 0.0, 1.0)
         forward_bias = 1.0 - 0.10 * np.abs(angles - 90.0) / 90.0
         scores = normalized * forward_bias
 
-        navigation_margin = int(max(0, self.settings.navigation_margin_rays))
-        if n_rays > navigation_margin * 2 + 1:
-            nav_scores = scores.copy()
-            nav_scores[:navigation_margin] = 0.0
-            nav_scores[n_rays - navigation_margin:] = 0.0
-        else:
-            nav_scores = scores.copy()
-
-        # Centre-de-masse des meilleurs rayons uniquement : plus stable que argmax,
-        # mais moins attire par les rayons moyens qui restent droits en entree de virage.
-        peak_score = float(nav_scores.max()) if nav_scores.size else 0.0
-        if peak_score > 1e-6:
-            nav_weights = np.where(nav_scores >= peak_score * 0.72, nav_scores ** 3, 0.0)
-        else:
-            nav_weights = np.zeros_like(nav_scores)
-        target_idx = int(np.argmax(nav_scores))  # conservé pour diagnostics
-        if nav_weights.sum() > 1e-6:
-            target_angle = float(np.average(angles, weights=nav_weights))
-        else:
-            target_angle = 90.0
-        ray_steering = (90.0 - target_angle) / 90.0 * self.settings.steering_gain
-        ray_steering_before_balance = ray_steering
+        target_idx = int(np.argmax(scores))
+        target_angle = float(angles[target_idx])
+        steering = (90.0 - target_angle) / 90.0 * self.settings.steering_gain
 
         right_clear = float(distances[:middle].mean()) if middle > 0 else max_distance
         left_clear = float(distances[middle + 1 :].mean()) if middle + 1 < n_rays else max_distance
-        right_min = float(distances[:middle].min()) if middle > 0 else max_distance
-        left_min = float(distances[middle + 1 :].min()) if middle + 1 < n_rays else max_distance
-        right_emergency_rays = distances[1:middle] if middle > 2 else distances[:middle]
-        left_emergency_rays = distances[middle + 1 : -1] if middle + 2 < n_rays else distances[middle + 1 :]
-        right_emergency_clear = (
-            float(np.median(right_emergency_rays)) if right_emergency_rays.size else right_clear
-        )
-        left_emergency_clear = (
-            float(np.median(left_emergency_rays)) if left_emergency_rays.size else left_clear
-        )
         balance = (left_clear - right_clear) / max(left_clear + right_clear, 1.0)
-        ray_steering -= self.settings.avoid_gain * balance
+        steering -= self.settings.avoid_gain * balance
 
         center_window = distances[max(0, middle - 1) : min(n_rays, middle + 2)]
         front_min = float(center_window.min())
-
-        # Asymétrie lissée — utilisée uniquement pour orienter le steering,
-        # PAS pour déclencher l'anticipation (évite les sacades ON/OFF).
-        side_asymmetry = abs(left_clear - right_clear) / max(left_clear + right_clear, 1.0)
-        side_min_asymmetry = abs(left_min - right_min) / max(left_min + right_min, 1.0)
-        raw_asymmetry = 0.5 * side_asymmetry + 0.5 * side_min_asymmetry
-        self._smoothed_asymmetry = 0.12 * raw_asymmetry + 0.88 * self._smoothed_asymmetry
-        combined_asymmetry = self._smoothed_asymmetry
-        effective_front_min = front_min
-
         reason = "target_ray={}".format(target_idx)
-        boundary_distance = max(float(self.settings.boundary_avoidance_distance_px), 1.0)
-        boundary_closeness = np.clip((boundary_distance - distances) / boundary_distance, 0.0, 1.0)
-        if n_rays > navigation_margin * 2 + 1:
-            boundary_closeness[:navigation_margin] *= 0.45
-            boundary_closeness[n_rays - navigation_margin:] *= 0.45
-        side_sign = np.sign(angles - 90.0)
-        forward_weight = 1.0 - 0.45 * np.abs(angles - 90.0) / 90.0
-        pressure = boundary_closeness * forward_weight
-        left_mask = side_sign > 0.0
-        right_mask = side_sign < 0.0
-        if left_mask.any():
-            left_avg = pressure[left_mask].sum() / max(float(forward_weight[left_mask].sum()), 1e-6)
-            left_pressure = float(0.65 * pressure[left_mask].max() + 0.35 * left_avg)
-        else:
-            left_pressure = 0.0
-        if right_mask.any():
-            right_avg = pressure[right_mask].sum() / max(float(forward_weight[right_mask].sum()), 1e-6)
-            right_pressure = float(0.65 * pressure[right_mask].max() + 0.35 * right_avg)
-        else:
-            right_pressure = 0.0
-        boundary_avoidance_max = max(float(self.settings.boundary_avoidance_max_steering), 0.0)
-        boundary_avoidance = clamp(
-            (left_pressure - right_pressure) * float(self.settings.boundary_avoidance_gain),
-            -boundary_avoidance_max,
-            boundary_avoidance_max,
-        )
 
-        steering = ray_steering
-        fast_response = False
-        track_confidence = clamp(float(track_confidence), 0.0, 1.0)
-        center_offset = clamp(float(track_center_offset), -1.0, 1.0)
-        heading = clamp(float(track_heading), -1.0, 1.0)
-        centerline_steering = None
-        centerline_blend = 0.0
-        if track_confidence > 0.20:
-            centerline_steering = clamp(
-                self.settings.centerline_gain * center_offset
-                + self.settings.heading_gain * heading,
-                -1.0,
-                1.0,
-            )
-            centerline_blend = clamp(self.settings.centerline_blend * track_confidence, 0.0, 1.0)
-            steering = (1.0 - centerline_blend) * ray_steering + centerline_blend * centerline_steering
-            reason = "centerline(blend={:.2f},ray={})".format(centerline_blend, target_idx)
+        # Blend modele ML en virage serre si disponible
+        if self.corner_model is not None:
+            asymmetry = abs(left_clear - right_clear) / max(left_clear + right_clear, 1.0)
+            if asymmetry > 0.45:
+                ml_steering = self.corner_model.predict(distances)
+                blend = min((asymmetry - 0.45) / 0.55, 1.0)
+                steering = (1.0 - blend) * steering + blend * ml_steering
+                reason = "ml_corner(blend={:.2f})".format(blend)
 
-        if abs(boundary_avoidance) > 0.02:
-            steering = clamp(steering + boundary_avoidance, -1.0, 1.0)
-            if abs(boundary_avoidance) > 0.12:
-                reason = "boundary_avoidance"
-            if abs(boundary_avoidance) > 0.20:
-                fast_response = True
-
-        guard_distance = max(float(self.settings.boundary_guard_distance_px), 1.0)
-        guard_steering = clamp(float(self.settings.boundary_guard_steering), 0.0, 1.0)
-        closest_side = min(left_min, right_min)
-        guard_side = None
-        guard_forced_steering = None
-        anticipation_distance = max(float(self.settings.turn_anticipation_distance_px), 1.0)
-        anticipation_steering = clamp(float(self.settings.turn_anticipation_steering), 0.0, 1.0)
-        # effective_front_min intègre l'asymétrie gauche/droite : détecte les
-        # virages même quand les rayons avant sont encore libres.
-        anticipation_active = effective_front_min < anticipation_distance
-        anticipation_proximity = (
-            clamp(1.0 - effective_front_min / anticipation_distance, 0.0, 1.0)
-            if anticipation_active
-            else 0.0
-        )
-
-        turn_memory_duration = max(float(self.settings.turn_memory_s), 1e-6)
-        turn_memory_blend = 0.0
-        if centerline_steering is not None:
-            if track_confidence > 0.22 and abs(centerline_steering) > 0.08:
-                self.turn_memory_steering = centerline_steering
-                self.turn_memory_remaining_s = max(float(self.settings.turn_memory_s), 0.0)
-            elif track_confidence > 0.55 and abs(centerline_steering) < 0.05:
-                self.turn_memory_remaining_s = 0.0
-
-        if self.turn_memory_remaining_s > 0.0 and abs(self.turn_memory_steering) > 0.05:
-            uncertainty = clamp((0.80 - track_confidence) / 0.80, 0.0, 1.0)
-            turn_memory_blend = clamp(
-                float(self.settings.turn_memory_gain)
-                * uncertainty
-                * (self.turn_memory_remaining_s / turn_memory_duration),
-                0.0,
-                0.85,
-            )
-            if anticipation_active and abs(steering) < abs(self.turn_memory_steering):
-                turn_memory_blend = max(turn_memory_blend, 0.35)
-            if turn_memory_blend > 0.02:
-                steering = (
-                    (1.0 - turn_memory_blend) * steering
-                    + turn_memory_blend * self.turn_memory_steering
-                )
-                if reason.startswith("target_ray"):
-                    reason = "turn_memory"
-                if anticipation_active:
-                    fast_response = True
-
-        # En anticipation de virage on désactive le guard : la bande intérieure
-        # est naturellement proche et le guard combattrait la direction du virage.
-        if closest_side < guard_distance and not anticipation_active:
-            proximity = clamp((guard_distance - closest_side) / guard_distance, 0.0, 1.0)
-            forced = guard_steering * (0.55 + 0.45 * proximity)
-            if right_min < left_min * 0.92:
-                steering = min(steering, -forced)
-                reason = "boundary_guard_right"
-                fast_response = True
-                guard_side = "right"
-                guard_forced_steering = -forced
-            elif left_min < right_min * 0.92:
-                steering = max(steering, forced)
-                reason = "boundary_guard_left"
-                fast_response = True
-                guard_side = "left"
-                guard_forced_steering = forced
-
-        if anticipation_active:
-            fast_response = True
-            reason = "turn_anticipation"
-            min_anticipation_steer = anticipation_steering * clamp(0.55 + 0.45 * anticipation_proximity, 0.55, 1.0)
-            if abs(steering) < min_anticipation_steer:
-                if abs(boundary_avoidance) > 0.06:
-                    direction = 1.0 if boundary_avoidance > 0.0 else -1.0
-                elif centerline_steering is not None and abs(centerline_steering) > 0.06:
-                    direction = 1.0 if centerline_steering > 0.0 else -1.0
-                elif abs(steering) > 0.05:
-                    direction = 1.0 if steering > 0.0 else -1.0
-                elif track_confidence > 0.20 and abs(heading) > 0.05:
-                    direction = 1.0 if heading > 0.0 else -1.0
-                elif self.turn_memory_remaining_s > 0.0 and abs(self.turn_memory_steering) > 0.05:
-                    direction = 1.0 if self.turn_memory_steering > 0.0 else -1.0
-                elif left_min < right_min:
-                    direction = 1.0
-                elif right_min < left_min:
-                    direction = -1.0
-                elif abs(self.previous_steering) > 0.05:
-                    direction = 1.0 if self.previous_steering > 0.0 else -1.0
-                else:
-                    direction = 0.0
-                if direction != 0.0:
-                    steering = direction * min_anticipation_steer
-
-        emergency_side = None
         if front_min < self.settings.emergency_distance_px:
-            switch_ratio = max(float(self.settings.emergency_switch_ratio), 1.0)
-            if left_emergency_clear > right_emergency_clear * switch_ratio:
-                steering = -0.85
-                emergency_side = "right"
-            elif right_emergency_clear > left_emergency_clear * switch_ratio:
-                steering = 0.85
-                emergency_side = "left"
-            elif self.emergency_hold_remaining_s > 0.0 and self.emergency_steering != 0.0:
-                steering = self.emergency_steering
-                emergency_side = "hold"
-            elif abs(self.previous_steering) > 0.12:
-                steering = 0.85 if self.previous_steering > 0.0 else -0.85
-                emergency_side = "previous"
-            elif left_emergency_clear > right_emergency_clear:
-                steering = -0.85
-                emergency_side = "right"
-            else:
-                steering = 0.85
-                emergency_side = "left"
-            self.emergency_steering = steering
-            self.emergency_hold_remaining_s = max(float(self.settings.emergency_hold_s), 0.0)
+            steering = -0.85 if left_clear > right_clear else 0.85
             reason = "emergency_avoid"
-            fast_response = True
 
         smoothing = self._steering_alpha(dt_s)
-        if fast_response:
-            smoothing = max(smoothing, 0.90)
-        pre_smooth_steering = steering
         steering = self.previous_steering + smoothing * (steering - self.previous_steering)
         steering = clamp(steering, -1.0, 1.0)
         self.previous_steering = steering
 
-        curve_intensity = max(
-            abs(steering),
-            track_confidence * (
-                0.45 * abs(float(track_center_offset))
-                + 0.75 * abs(float(track_heading))
-            ),
-        )
-        boundary_pressure_peak = max(left_pressure, right_pressure)
-        turn_factor = 1.0 - self.settings.throttle_turn_slowdown * clamp(curve_intensity, 0.0, 1.0)
+        turn_factor = 1.0 - self.settings.throttle_turn_slowdown * abs(steering)
         throttle = self.settings.base_throttle * clamp(turn_factor, 0.0, 1.0)
-        throttle_before_slow_frame = throttle
         if dt_s is not None and dt_s > self.settings.slow_frame_threshold_s:
             throttle *= clamp(self.settings.slow_frame_threshold_s / dt_s, 0.25, 1.0)
-        boundary_throttle_scale = 1.0
-        recovery_throttle = clamp(float(self.settings.recovery_throttle), 0.0, self.settings.max_throttle)
-        hard_stop_distance = max(float(self.settings.hard_stop_distance_px), 1.0)
-        recovery_active = False
-        hard_stop_active = min(closest_side, front_min) < hard_stop_distance
-        if boundary_pressure_peak > 0.18:
-            boundary_throttle_scale = 1.0 - 0.80 * clamp(
-                (boundary_pressure_peak - 0.18) / 0.55,
-                0.0,
-                1.0,
-            )
-            throttle = min(throttle, self.settings.base_throttle * boundary_throttle_scale)
-            if boundary_pressure_peak > 0.32:
-                recovery_active = True
-        if anticipation_active:
-            effective_scale = clamp(float(self.settings.turn_anticipation_throttle_scale), 0.0, 1.0)
-            gradual_scale = 1.0 - (1.0 - effective_scale) * anticipation_proximity
-            throttle = min(throttle, self.settings.base_throttle * gradual_scale)
-        if closest_side < guard_distance:
-            recovery_active = True
         if front_min < self.settings.emergency_distance_px:
-            recovery_active = True
-        if recovery_active and not hard_stop_active:
-            throttle = min(throttle, recovery_throttle)
-        if hard_stop_active:
             throttle = min(throttle, self.settings.min_throttle)
         throttle = clamp(throttle, self.settings.min_throttle, self.settings.max_throttle)
 
-        # Lissage asymétrique du throttle : rapide à la baisse (sécurité),
-        # lent à la montée (évite les sacades d'accélération).
-        if throttle < self.previous_throttle:
-            throttle = 0.35 * throttle + 0.65 * self.previous_throttle  # descente rapide
-        else:
-            throttle = 0.18 * throttle + 0.82 * self.previous_throttle  # montée lente
-        throttle = clamp(throttle, self.settings.min_throttle, self.settings.max_throttle)
-        self.previous_throttle = throttle
-
         confidence = clamp(mask_fraction / max(self.settings.lost_mask_fraction * 8.0, 1e-6), 0.0, 1.0)
-        diagnostics = {
-            "n_rays": int(n_rays),
-            "ray_fov": float(ray_fov),
-            "navigation_margin_rays": int(navigation_margin),
-            "target_idx": int(target_idx),
-            "target_angle": float(target_angle),
-            "target_distance": float(distances[target_idx]),
-            "ray_steering": float(ray_steering),
-            "ray_steering_before_balance": float(ray_steering_before_balance),
-            "balance": float(balance),
-            "left_clear": float(left_clear),
-            "right_clear": float(right_clear),
-            "left_emergency_clear": float(left_emergency_clear),
-            "right_emergency_clear": float(right_emergency_clear),
-            "left_min": float(left_min),
-            "right_min": float(right_min),
-            "front_min": float(front_min),
-            "effective_front_min": float(effective_front_min),
-            "side_asymmetry": float(combined_asymmetry),
-            "boundary_avoidance": float(boundary_avoidance),
-            "left_pressure": float(left_pressure),
-            "right_pressure": float(right_pressure),
-            "boundary_pressure_peak": float(boundary_pressure_peak),
-            "boundary_avoidance_distance": float(boundary_distance),
-            "anticipation_active": bool(anticipation_active),
-            "anticipation_distance": float(anticipation_distance),
-            "track_center": float(center_offset),
-            "track_heading": float(heading),
-            "track_confidence": float(track_confidence),
-            "centerline_steering": None if centerline_steering is None else float(centerline_steering),
-            "centerline_blend": float(centerline_blend),
-            "turn_memory_steering": float(self.turn_memory_steering),
-            "turn_memory_remaining_s": float(self.turn_memory_remaining_s),
-            "turn_memory_blend": float(turn_memory_blend),
-            "guard_side": guard_side,
-            "guard_distance": float(guard_distance),
-            "guard_forced_steering": (
-                None if guard_forced_steering is None else float(guard_forced_steering)
-            ),
-            "emergency_side": emergency_side,
-            "emergency_hold_remaining_s": float(self.emergency_hold_remaining_s),
-            "fast_response": bool(fast_response),
-            "smoothing": float(smoothing),
-            "pre_smooth_steering": float(pre_smooth_steering),
-            "curve_intensity": float(curve_intensity),
-            "turn_factor": float(turn_factor),
-            "boundary_throttle_scale": float(boundary_throttle_scale),
-            "recovery_active": bool(recovery_active),
-            "recovery_throttle": float(recovery_throttle),
-            "hard_stop_active": bool(hard_stop_active),
-            "hard_stop_distance": float(hard_stop_distance),
-            "throttle_before_slow_frame": float(throttle_before_slow_frame),
-        }
-        return DriveCommand(
-            throttle=throttle,
-            steering=steering,
-            confidence=confidence,
-            reason=reason,
-            diagnostics=diagnostics,
-        )
+        return DriveCommand(throttle=throttle, steering=steering, confidence=confidence, reason=reason)
 
     def _steering_alpha(self, dt_s: Optional[float]) -> float:
         if dt_s is None or self.settings.steering_time_constant_s <= 0.0:
@@ -429,20 +114,11 @@ class RaycastLineFollower:
         return clamp(dt_s / (self.settings.steering_time_constant_s + dt_s), 0.0, 1.0)
 
     def _lost(self, reason: str) -> DriveCommand:
-        self._lost_frames += 1
-        recovery_window = 6  # ~0.3s a 20fps
-        if self._lost_frames <= recovery_window:
-            decay = max(1.0 - 0.12 * self._lost_frames, 0.3)
-            steering = self.previous_steering * decay
-            throttle = self.settings.recovery_throttle * 0.45
-        else:
-            steering = self.previous_steering * 0.3
-            throttle = self.settings.lost_line_throttle
+        steering = self.previous_steering * 0.8
         self.previous_steering = steering
         return DriveCommand(
-            throttle=throttle,
+            throttle=self.settings.lost_line_throttle,
             steering=steering,
             confidence=0.0,
             reason=reason,
-            diagnostics={"lost_reason": reason, "lost_frames": self._lost_frames},
         )
