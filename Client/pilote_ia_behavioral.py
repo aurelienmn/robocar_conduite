@@ -43,6 +43,39 @@ _stream_lock = threading.Lock()
 _latest_jpeg = b""
 
 
+class LogitechGamepad(Gamepad.Gamepad):
+    """Logitech F310/F710 mapping in XInput mode."""
+
+    fullName = "Logitech F310/F710 controller"
+
+    def __init__(self, joystickNumber: int = 0):
+        Gamepad.Gamepad.__init__(self, joystickNumber)
+        self.axisNames = {
+            0: "LX",
+            1: "LY",
+            2: "LT",
+            3: "RX",
+            4: "RY",
+            5: "RT",
+            6: "DX",
+            7: "DY",
+        }
+        self.buttonNames = {
+            0: "A",
+            1: "B",
+            2: "X",
+            3: "Y",
+            4: "LB",
+            5: "RB",
+            6: "BACK",
+            7: "START",
+            8: "LOGITECH",
+            9: "LA",
+            10: "RA",
+        }
+        self._setupReverseMaps()
+
+
 def clamp(value: float, min_value: float, max_value: float) -> float:
     return max(min_value, min(max_value, value))
 
@@ -70,6 +103,7 @@ def apply_deadzone(value: float, deadzone: float = 0.05) -> float:
 def build_gamepad(kind: str):
     mapping = {
         "xbox360": Gamepad.Xbox360,
+        "logitech": LogitechGamepad,
         "ps4": Gamepad.PS4,
         "ps3": Gamepad.PS3,
         "generic": Gamepad.Gamepad,
@@ -1431,7 +1465,11 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--output", type=Path, default=None)
     record.add_argument("--direction", choices=("forward", "reverse"), default="forward")
     record.add_argument("--dry-run", action="store_true")
-    record.add_argument("--gamepad", choices=("auto", "xbox360", "ps4", "ps3", "generic"), default="auto")
+    record.add_argument(
+        "--gamepad",
+        choices=("auto", "xbox360", "logitech", "ps4", "ps3", "generic"),
+        default="auto",
+    )
     record.add_argument("--record-button", default="A,CROSS,0")
     record.add_argument("--quit-button", default="START,OPTIONS,7,9")
     record.add_argument("--steering-axis", default="LX,LEFT-X,0")
@@ -1483,7 +1521,11 @@ def build_parser() -> argparse.ArgumentParser:
     drive.add_argument("--window", action="store_true")
     drive.add_argument("--no-log", action="store_true")
     drive.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR)
-    drive.add_argument("--gamepad", choices=("auto", "xbox360", "ps4", "ps3", "generic"), default="auto")
+    drive.add_argument(
+        "--gamepad",
+        choices=("auto", "xbox360", "logitech", "ps4", "ps3", "generic"),
+        default="auto",
+    )
     drive.add_argument("--no-gamepad-stop", action="store_true")
     drive.add_argument("--quit-button", default="START,OPTIONS,7,9")
     drive.add_argument("--stale-timeout", type=float, default=1.0)
