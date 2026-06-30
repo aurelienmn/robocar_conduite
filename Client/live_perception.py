@@ -33,6 +33,8 @@ class WhiteTapePerception:
     def __init__(self, settings: PerceptionSettings) -> None:
         self.settings = settings
         self._track_width_px: float = 0.0
+        self._track_center_offset: float = 0.0
+        self._track_heading: float = 0.0
 
     def predict_mask(self, frame_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         if frame_bgr.ndim != 3 or frame_bgr.shape[2] != 3:
@@ -96,7 +98,7 @@ class WhiteTapePerception:
         return mask, mask_before_filter
 
     @staticmethod
-    def _estimate_track_center(mask, width_hint: float = 0.0):
+    def _estimate_track_center(mask, width_hint: float = 0.0, center_hint: float = 0.0):
         h, w = mask.shape
         if not mask.any():
             return 0.0, 0.0, 0.0, 0.0, tuple()
@@ -111,7 +113,7 @@ class WhiteTapePerception:
         nominal_width = width_hint if width_hint > w * 0.12 else w * 0.58
         min_width = w * 0.18
         max_width = w * 0.92
-        previous_center = center_x
+        previous_center = float(np.clip(center_x + center_hint * center_x, 0.0, w - 1.0))
         widths = []
 
         def contiguous_runs(cols):
@@ -196,18 +198,20 @@ class WhiteTapePerception:
         )
         consistency = float(np.clip(1.0 - residual_px / max(w * 0.16, 1.0), 0.0, 1.0))
 
-        target_center = float(
-            np.average(fitted_xs, weights=fit_weights * (1.0 + 0.35 * center_qualities))
-        )
         near_y = float(np.median(center_ys[: min(3, len(center_ys))]))
         far_y = float(np.median(center_ys[max(0, len(center_ys) - 3):]))
         near = float(np.polyval(fit_coeffs, near_y))
         far = float(np.polyval(fit_coeffs, far_y))
+        average_center = float(
+            np.average(fitted_xs, weights=fit_weights * (1.0 + 0.35 * center_qualities))
+        )
+        strong_pairs = int(np.count_nonzero(center_qualities >= 1.0))
+        lookahead_weight = 0.70 if strong_pairs >= 2 else 0.55
+        target_center = lookahead_weight * far + (1.0 - lookahead_weight) * average_center
 
         offset = (target_center - center_x) / max(center_x, 1.0)
         heading = (far - near) / max(center_x, 1.0)
         confidence = min(1.0, quality_total / 6.0) * (0.45 + 0.55 * consistency)
-        strong_pairs = int(np.count_nonzero(center_qualities >= 1.0))
         if strong_pairs < 2:
             confidence = min(confidence, 0.45)
         points = tuple(
@@ -272,7 +276,9 @@ class WhiteTapePerception:
         rejected = mask_before_filter & ~mask
         raycast = cast_rays(mask, n_rays=self.settings.n_rays, fov=self.settings.fov).astype(np.float32)
         center_offset, heading, confidence, width_px, points = self._estimate_track_center(
-            mask, self._track_width_px
+            mask,
+            self._track_width_px,
+            self._track_center_offset,
         )
         if confidence > 0.30 and width_px > 0.0:
             alpha = 0.12 if confidence > 0.55 else 0.04
@@ -280,6 +286,15 @@ class WhiteTapePerception:
                 self._track_width_px = alpha * width_px + (1.0 - alpha) * self._track_width_px
             else:
                 self._track_width_px = width_px
+        if confidence > 0.18:
+            alpha = 0.40 if confidence > 0.55 else 0.22
+            self._track_center_offset = (
+                alpha * center_offset + (1.0 - alpha) * self._track_center_offset
+            )
+            self._track_heading = alpha * heading + (1.0 - alpha) * self._track_heading
+        else:
+            self._track_center_offset *= 0.92
+            self._track_heading *= 0.92
         return PerceptionResult(
             frame_bgr=frame_bgr,
             mask=mask,

@@ -41,6 +41,8 @@ class RaycastLineFollower:
         self.previous_steering = 0.0
         self.emergency_hold_remaining_s = 0.0
         self.emergency_steering = 0.0
+        self.turn_memory_remaining_s = 0.0
+        self.turn_memory_steering = 0.0
         self._lost_frames = 0
 
     def predict(
@@ -68,6 +70,7 @@ class RaycastLineFollower:
         middle = n_rays // 2
         dt_step = 0.10 if dt_s is None else max(float(dt_s), 0.0)
         self.emergency_hold_remaining_s = max(0.0, self.emergency_hold_remaining_s - dt_step)
+        self.turn_memory_remaining_s = max(0.0, self.turn_memory_remaining_s - dt_step)
         if n_rays == 1:
             angles = np.array([90.0], dtype=np.float32)
         else:
@@ -82,12 +85,23 @@ class RaycastLineFollower:
         navigation_margin = int(max(0, self.settings.navigation_margin_rays))
         if n_rays > navigation_margin * 2 + 1:
             nav_scores = scores.copy()
-            nav_scores[:navigation_margin] = -1.0
-            nav_scores[n_rays - navigation_margin:] = -1.0
-            target_idx = int(np.argmax(nav_scores))
+            nav_scores[:navigation_margin] = 0.0
+            nav_scores[n_rays - navigation_margin:] = 0.0
         else:
-            target_idx = int(np.argmax(scores))
-        target_angle = float(angles[target_idx])
+            nav_scores = scores.copy()
+
+        # Centre-de-masse des meilleurs rayons uniquement : plus stable que argmax,
+        # mais moins attire par les rayons moyens qui restent droits en entree de virage.
+        peak_score = float(nav_scores.max()) if nav_scores.size else 0.0
+        if peak_score > 1e-6:
+            nav_weights = np.where(nav_scores >= peak_score * 0.72, nav_scores ** 3, 0.0)
+        else:
+            nav_weights = np.zeros_like(nav_scores)
+        target_idx = int(np.argmax(nav_scores))  # conservé pour diagnostics
+        if nav_weights.sum() > 1e-6:
+            target_angle = float(np.average(angles, weights=nav_weights))
+        else:
+            target_angle = 90.0
         ray_steering = (90.0 - target_angle) / 90.0 * self.settings.steering_gain
         ray_steering_before_balance = ray_steering
 
@@ -144,9 +158,11 @@ class RaycastLineFollower:
         centerline_steering = None
         centerline_blend = 0.0
         if track_confidence > 0.20:
-            centerline_steering = (
+            centerline_steering = clamp(
                 self.settings.centerline_gain * center_offset
-                + self.settings.heading_gain * heading
+                + self.settings.heading_gain * heading,
+                -1.0,
+                1.0,
             )
             centerline_blend = clamp(self.settings.centerline_blend * track_confidence, 0.0, 1.0)
             steering = (1.0 - centerline_blend) * ray_steering + centerline_blend * centerline_steering
@@ -164,7 +180,48 @@ class RaycastLineFollower:
         closest_side = min(left_min, right_min)
         guard_side = None
         guard_forced_steering = None
-        if closest_side < guard_distance:
+        anticipation_distance = max(float(self.settings.turn_anticipation_distance_px), 1.0)
+        anticipation_steering = clamp(float(self.settings.turn_anticipation_steering), 0.0, 1.0)
+        anticipation_active = front_min < anticipation_distance
+        anticipation_proximity = (
+            clamp(1.0 - front_min / anticipation_distance, 0.0, 1.0)
+            if anticipation_active
+            else 0.0
+        )
+
+        turn_memory_duration = max(float(self.settings.turn_memory_s), 1e-6)
+        turn_memory_blend = 0.0
+        if centerline_steering is not None:
+            if track_confidence > 0.22 and abs(centerline_steering) > 0.08:
+                self.turn_memory_steering = centerline_steering
+                self.turn_memory_remaining_s = max(float(self.settings.turn_memory_s), 0.0)
+            elif track_confidence > 0.55 and abs(centerline_steering) < 0.05:
+                self.turn_memory_remaining_s = 0.0
+
+        if self.turn_memory_remaining_s > 0.0 and abs(self.turn_memory_steering) > 0.05:
+            uncertainty = clamp((0.80 - track_confidence) / 0.80, 0.0, 1.0)
+            turn_memory_blend = clamp(
+                float(self.settings.turn_memory_gain)
+                * uncertainty
+                * (self.turn_memory_remaining_s / turn_memory_duration),
+                0.0,
+                0.85,
+            )
+            if anticipation_active and abs(steering) < abs(self.turn_memory_steering):
+                turn_memory_blend = max(turn_memory_blend, 0.35)
+            if turn_memory_blend > 0.02:
+                steering = (
+                    (1.0 - turn_memory_blend) * steering
+                    + turn_memory_blend * self.turn_memory_steering
+                )
+                if reason.startswith("target_ray"):
+                    reason = "turn_memory"
+                if anticipation_active:
+                    fast_response = True
+
+        # En anticipation de virage on désactive le guard : la bande intérieure
+        # est naturellement proche et le guard combattrait la direction du virage.
+        if closest_side < guard_distance and not anticipation_active:
             proximity = clamp((guard_distance - closest_side) / guard_distance, 0.0, 1.0)
             forced = guard_steering * (0.55 + 0.45 * proximity)
             if right_min < left_min * 0.92:
@@ -180,10 +237,6 @@ class RaycastLineFollower:
                 guard_side = "left"
                 guard_forced_steering = forced
 
-        anticipation_distance = max(float(self.settings.turn_anticipation_distance_px), 1.0)
-        anticipation_steering = clamp(float(self.settings.turn_anticipation_steering), 0.0, 1.0)
-        anticipation_active = front_min < anticipation_distance
-        anticipation_proximity = clamp(1.0 - front_min / anticipation_distance, 0.0, 1.0) if anticipation_active else 0.0
         if anticipation_active:
             fast_response = True
             reason = "turn_anticipation"
@@ -197,6 +250,8 @@ class RaycastLineFollower:
                     direction = 1.0 if steering > 0.0 else -1.0
                 elif track_confidence > 0.20 and abs(heading) > 0.05:
                     direction = 1.0 if heading > 0.0 else -1.0
+                elif self.turn_memory_remaining_s > 0.0 and abs(self.turn_memory_steering) > 0.05:
+                    direction = 1.0 if self.turn_memory_steering > 0.0 else -1.0
                 elif left_min < right_min:
                     direction = 1.0
                 elif right_min < left_min:
@@ -278,7 +333,7 @@ class RaycastLineFollower:
         if front_min < self.settings.emergency_distance_px:
             recovery_active = True
         if recovery_active and not hard_stop_active:
-            throttle = recovery_throttle
+            throttle = min(throttle, recovery_throttle)
         if hard_stop_active:
             throttle = min(throttle, self.settings.min_throttle)
         throttle = clamp(throttle, self.settings.min_throttle, self.settings.max_throttle)
@@ -313,6 +368,9 @@ class RaycastLineFollower:
             "track_confidence": float(track_confidence),
             "centerline_steering": None if centerline_steering is None else float(centerline_steering),
             "centerline_blend": float(centerline_blend),
+            "turn_memory_steering": float(self.turn_memory_steering),
+            "turn_memory_remaining_s": float(self.turn_memory_remaining_s),
+            "turn_memory_blend": float(turn_memory_blend),
             "guard_side": guard_side,
             "guard_distance": float(guard_distance),
             "guard_forced_steering": (

@@ -60,6 +60,8 @@ class ControllerSettings:
     hard_stop_distance_px: float = 45.0
     emergency_hold_s: float = 0.35
     emergency_switch_ratio: float = 1.55
+    turn_memory_s: float = 0.45
+    turn_memory_gain: float = 0.55
     steering_smoothing: float = 0.35
     steering_time_constant_s: float = 0.25
     throttle_turn_slowdown: float = 0.65
