@@ -107,24 +107,51 @@ class RaycastLineFollower:
 
         guard_distance = max(float(self.settings.boundary_guard_distance_px), 1.0)
         guard_steering = clamp(float(self.settings.boundary_guard_steering), 0.0, 1.0)
+        guard_reverse_distance = clamp(
+            float(self.settings.boundary_guard_reverse_distance_px),
+            0.0,
+            guard_distance,
+        )
         closest_side = min(left_min, right_min)
         guard_side = None
+        guard_candidate_side = None
+        guard_suppressed_side = None
         guard_forced_steering = None
         if closest_side < guard_distance:
             proximity = clamp((guard_distance - closest_side) / guard_distance, 0.0, 1.0)
             forced = guard_steering * (0.55 + 0.45 * proximity)
             if right_min < left_min * 0.92:
-                steering = min(steering, -forced)
-                reason = "boundary_guard_right"
-                fast_response = True
-                guard_side = "right"
-                guard_forced_steering = -forced
+                guard_candidate_side = "right"
+                forced_steering = -forced
+                if self._should_apply_boundary_guard(
+                    steering,
+                    forced_steering,
+                    closest_side,
+                    guard_reverse_distance,
+                ):
+                    steering = min(steering, forced_steering)
+                    reason = "boundary_guard_right"
+                    fast_response = True
+                    guard_side = "right"
+                    guard_forced_steering = forced_steering
+                else:
+                    guard_suppressed_side = "right"
             elif left_min < right_min * 0.92:
-                steering = max(steering, forced)
-                reason = "boundary_guard_left"
-                fast_response = True
-                guard_side = "left"
-                guard_forced_steering = forced
+                guard_candidate_side = "left"
+                forced_steering = forced
+                if self._should_apply_boundary_guard(
+                    steering,
+                    forced_steering,
+                    closest_side,
+                    guard_reverse_distance,
+                ):
+                    steering = max(steering, forced_steering)
+                    reason = "boundary_guard_left"
+                    fast_response = True
+                    guard_side = "left"
+                    guard_forced_steering = forced_steering
+                else:
+                    guard_suppressed_side = "left"
 
         emergency_side = None
         if front_min < self.settings.emergency_distance_px:
@@ -178,7 +205,10 @@ class RaycastLineFollower:
             "centerline_steering": None if centerline_steering is None else float(centerline_steering),
             "centerline_blend": float(centerline_blend),
             "guard_side": guard_side,
+            "guard_candidate_side": guard_candidate_side,
+            "guard_suppressed_side": guard_suppressed_side,
             "guard_distance": float(guard_distance),
+            "guard_reverse_distance": float(guard_reverse_distance),
             "guard_forced_steering": (
                 None if guard_forced_steering is None else float(guard_forced_steering)
             ),
@@ -202,6 +232,19 @@ class RaycastLineFollower:
         if dt_s is None or self.settings.steering_time_constant_s <= 0.0:
             return clamp(self.settings.steering_smoothing, 0.0, 1.0)
         return clamp(dt_s / (self.settings.steering_time_constant_s + dt_s), 0.0, 1.0)
+
+    @staticmethod
+    def _should_apply_boundary_guard(
+        planned_steering: float,
+        forced_steering: float,
+        closest_side: float,
+        reverse_distance: float,
+    ) -> bool:
+        if planned_steering * forced_steering >= 0.0:
+            return True
+        if abs(planned_steering) < 0.18:
+            return True
+        return closest_side <= reverse_distance
 
     def _lost(self, reason: str) -> DriveCommand:
         steering = self.previous_steering * 0.8

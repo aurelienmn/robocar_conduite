@@ -72,6 +72,8 @@ def compact_frame(event):
         "rmin": diag.get("right_min"),
         "target": diag.get("target_idx"),
         "guard": diag.get("guard_side"),
+        "guard_candidate": diag.get("guard_candidate_side"),
+        "guard_suppressed": diag.get("guard_suppressed_side"),
         "emerg": diag.get("emergency_side"),
         "pre": None if diag.get("pre_smooth_steering") is None else round(diag["pre_smooth_steering"], 3),
         "smooth": None if diag.get("smoothing") is None else round(diag["smoothing"], 3),
@@ -117,6 +119,10 @@ def main() -> None:
     line_lost = [event for event in events if event.get("reason") == "line_lost"]
     emergencies = [event for event in events if event.get("reason") == "emergency_avoid"]
     guards = [event for event in events if event.get("reason", "").startswith("boundary_guard")]
+    suppressed_guards = [
+        event for event in events
+        if event.get("diagnostics", {}).get("guard_suppressed_side") is not None
+    ]
     low_track = [
         event for event in events
         if 0.0 < event.get("track_confidence", 0.0) < 0.30
@@ -176,6 +182,7 @@ def main() -> None:
     print_examples("Frames line_lost", line_lost, args.max_examples)
     print_examples("Frames emergency_avoid", emergencies, args.max_examples)
     print_examples("Frames boundary_guard", guards, args.max_examples)
+    print_examples("Frames boundary_guard ignore en virage", suppressed_guards, args.max_examples)
     print_examples("Track confidence faible mais non nul", low_track, args.max_examples)
     print_examples("Front proche sans emergency", close_front_not_emergency, args.max_examples)
     print_examples("Throttle haut avec front proche", high_throttle_close, args.max_examples)

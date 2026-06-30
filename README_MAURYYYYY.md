@@ -67,6 +67,7 @@ cat analyse.txt
 | Vire trop peu au centre de piste | `centerline_gain` / `heading_gain` | Augmenter legerement |
 | Evite trop tard une bande proche | `boundary_guard_distance_px` | Augmenter |
 | Evite trop fort une bande proche | `boundary_guard_steering` | Baisser |
+| Inverse les roues au milieu d'un virage | `boundary_guard_reverse_distance_px` | Baisser |
 | Raycast fallback vire trop peu | `steering_gain` | Augmenter legerement |
 | Conduite saccadee | `steering_smoothing` | Augmenter (ex: 0.5) |
 | Freine trop en virage | `throttle_turn_slowdown` | Baisser (ex: 0.4) |

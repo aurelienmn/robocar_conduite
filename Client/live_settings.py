@@ -49,6 +49,7 @@ class ControllerSettings:
     centerline_blend: float = 0.75
     boundary_guard_distance_px: float = 105.0
     boundary_guard_steering: float = 0.62
+    boundary_guard_reverse_distance_px: float = 45.0
     steering_smoothing: float = 0.35
     steering_time_constant_s: float = 0.25
     throttle_turn_slowdown: float = 0.65
