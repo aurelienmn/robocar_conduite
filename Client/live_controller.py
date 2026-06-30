@@ -39,6 +39,9 @@ class RaycastLineFollower:
     def __init__(self, settings: ControllerSettings) -> None:
         self.settings = settings
         self.previous_steering = 0.0
+        self.emergency_hold_remaining_s = 0.0
+        self.emergency_steering = 0.0
+        self._lost_frames = 0
 
     def predict(
         self,
@@ -60,8 +63,11 @@ class RaycastLineFollower:
         if mask_fraction < self.settings.lost_mask_fraction:
             return self._lost("line_lost")
 
+        self._lost_frames = 0
         n_rays = len(distances)
         middle = n_rays // 2
+        dt_step = 0.10 if dt_s is None else max(float(dt_s), 0.0)
+        self.emergency_hold_remaining_s = max(0.0, self.emergency_hold_remaining_s - dt_step)
         if n_rays == 1:
             angles = np.array([90.0], dtype=np.float32)
         else:
@@ -73,7 +79,14 @@ class RaycastLineFollower:
         forward_bias = 1.0 - 0.10 * np.abs(angles - 90.0) / 90.0
         scores = normalized * forward_bias
 
-        target_idx = int(np.argmax(scores))
+        navigation_margin = int(max(0, self.settings.navigation_margin_rays))
+        if n_rays > navigation_margin * 2 + 1:
+            nav_scores = scores.copy()
+            nav_scores[:navigation_margin] = -1.0
+            nav_scores[n_rays - navigation_margin:] = -1.0
+            target_idx = int(np.argmax(nav_scores))
+        else:
+            target_idx = int(np.argmax(scores))
         target_angle = float(angles[target_idx])
         ray_steering = (90.0 - target_angle) / 90.0 * self.settings.steering_gain
         ray_steering_before_balance = ray_steering
@@ -82,12 +95,46 @@ class RaycastLineFollower:
         left_clear = float(distances[middle + 1 :].mean()) if middle + 1 < n_rays else max_distance
         right_min = float(distances[:middle].min()) if middle > 0 else max_distance
         left_min = float(distances[middle + 1 :].min()) if middle + 1 < n_rays else max_distance
+        right_emergency_rays = distances[1:middle] if middle > 2 else distances[:middle]
+        left_emergency_rays = distances[middle + 1 : -1] if middle + 2 < n_rays else distances[middle + 1 :]
+        right_emergency_clear = (
+            float(np.median(right_emergency_rays)) if right_emergency_rays.size else right_clear
+        )
+        left_emergency_clear = (
+            float(np.median(left_emergency_rays)) if left_emergency_rays.size else left_clear
+        )
         balance = (left_clear - right_clear) / max(left_clear + right_clear, 1.0)
         ray_steering -= self.settings.avoid_gain * balance
 
         center_window = distances[max(0, middle - 1) : min(n_rays, middle + 2)]
         front_min = float(center_window.min())
         reason = "target_ray={}".format(target_idx)
+        boundary_distance = max(float(self.settings.boundary_avoidance_distance_px), 1.0)
+        boundary_closeness = np.clip((boundary_distance - distances) / boundary_distance, 0.0, 1.0)
+        if n_rays > navigation_margin * 2 + 1:
+            boundary_closeness[:navigation_margin] *= 0.45
+            boundary_closeness[n_rays - navigation_margin:] *= 0.45
+        side_sign = np.sign(angles - 90.0)
+        forward_weight = 1.0 - 0.45 * np.abs(angles - 90.0) / 90.0
+        pressure = boundary_closeness * forward_weight
+        left_mask = side_sign > 0.0
+        right_mask = side_sign < 0.0
+        if left_mask.any():
+            left_avg = pressure[left_mask].sum() / max(float(forward_weight[left_mask].sum()), 1e-6)
+            left_pressure = float(0.65 * pressure[left_mask].max() + 0.35 * left_avg)
+        else:
+            left_pressure = 0.0
+        if right_mask.any():
+            right_avg = pressure[right_mask].sum() / max(float(forward_weight[right_mask].sum()), 1e-6)
+            right_pressure = float(0.65 * pressure[right_mask].max() + 0.35 * right_avg)
+        else:
+            right_pressure = 0.0
+        boundary_avoidance_max = max(float(self.settings.boundary_avoidance_max_steering), 0.0)
+        boundary_avoidance = clamp(
+            (left_pressure - right_pressure) * float(self.settings.boundary_avoidance_gain),
+            -boundary_avoidance_max,
+            boundary_avoidance_max,
+        )
 
         steering = ray_steering
         fast_response = False
@@ -104,6 +151,13 @@ class RaycastLineFollower:
             centerline_blend = clamp(self.settings.centerline_blend * track_confidence, 0.0, 1.0)
             steering = (1.0 - centerline_blend) * ray_steering + centerline_blend * centerline_steering
             reason = "centerline(blend={:.2f},ray={})".format(centerline_blend, target_idx)
+
+        if abs(boundary_avoidance) > 0.02:
+            steering = clamp(steering + boundary_avoidance, -1.0, 1.0)
+            if abs(boundary_avoidance) > 0.12:
+                reason = "boundary_avoidance"
+            if abs(boundary_avoidance) > 0.20:
+                fast_response = True
 
         guard_distance = max(float(self.settings.boundary_guard_distance_px), 1.0)
         guard_steering = clamp(float(self.settings.boundary_guard_steering), 0.0, 1.0)
@@ -126,16 +180,63 @@ class RaycastLineFollower:
                 guard_side = "left"
                 guard_forced_steering = forced
 
+        anticipation_distance = max(float(self.settings.turn_anticipation_distance_px), 1.0)
+        anticipation_steering = clamp(float(self.settings.turn_anticipation_steering), 0.0, 1.0)
+        anticipation_active = front_min < anticipation_distance
+        anticipation_proximity = clamp(1.0 - front_min / anticipation_distance, 0.0, 1.0) if anticipation_active else 0.0
+        if anticipation_active:
+            fast_response = True
+            reason = "turn_anticipation"
+            min_anticipation_steer = anticipation_steering * clamp(0.55 + 0.45 * anticipation_proximity, 0.55, 1.0)
+            if abs(steering) < min_anticipation_steer:
+                if abs(boundary_avoidance) > 0.06:
+                    direction = 1.0 if boundary_avoidance > 0.0 else -1.0
+                elif centerline_steering is not None and abs(centerline_steering) > 0.06:
+                    direction = 1.0 if centerline_steering > 0.0 else -1.0
+                elif abs(steering) > 0.05:
+                    direction = 1.0 if steering > 0.0 else -1.0
+                elif track_confidence > 0.20 and abs(heading) > 0.05:
+                    direction = 1.0 if heading > 0.0 else -1.0
+                elif left_min < right_min:
+                    direction = 1.0
+                elif right_min < left_min:
+                    direction = -1.0
+                elif abs(self.previous_steering) > 0.05:
+                    direction = 1.0 if self.previous_steering > 0.0 else -1.0
+                else:
+                    direction = 0.0
+                if direction != 0.0:
+                    steering = direction * min_anticipation_steer
+
         emergency_side = None
         if front_min < self.settings.emergency_distance_px:
-            steering = -0.85 if left_clear > right_clear else 0.85
+            switch_ratio = max(float(self.settings.emergency_switch_ratio), 1.0)
+            if left_emergency_clear > right_emergency_clear * switch_ratio:
+                steering = -0.85
+                emergency_side = "right"
+            elif right_emergency_clear > left_emergency_clear * switch_ratio:
+                steering = 0.85
+                emergency_side = "left"
+            elif self.emergency_hold_remaining_s > 0.0 and self.emergency_steering != 0.0:
+                steering = self.emergency_steering
+                emergency_side = "hold"
+            elif abs(self.previous_steering) > 0.12:
+                steering = 0.85 if self.previous_steering > 0.0 else -0.85
+                emergency_side = "previous"
+            elif left_emergency_clear > right_emergency_clear:
+                steering = -0.85
+                emergency_side = "right"
+            else:
+                steering = 0.85
+                emergency_side = "left"
+            self.emergency_steering = steering
+            self.emergency_hold_remaining_s = max(float(self.settings.emergency_hold_s), 0.0)
             reason = "emergency_avoid"
             fast_response = True
-            emergency_side = "right" if left_clear > right_clear else "left"
 
         smoothing = self._steering_alpha(dt_s)
         if fast_response:
-            smoothing = max(smoothing, 0.70)
+            smoothing = max(smoothing, 0.90)
         pre_smooth_steering = steering
         steering = self.previous_steering + smoothing * (steering - self.previous_steering)
         steering = clamp(steering, -1.0, 1.0)
@@ -148,12 +249,37 @@ class RaycastLineFollower:
                 + 0.75 * abs(float(track_heading))
             ),
         )
+        boundary_pressure_peak = max(left_pressure, right_pressure)
         turn_factor = 1.0 - self.settings.throttle_turn_slowdown * clamp(curve_intensity, 0.0, 1.0)
         throttle = self.settings.base_throttle * clamp(turn_factor, 0.0, 1.0)
         throttle_before_slow_frame = throttle
         if dt_s is not None and dt_s > self.settings.slow_frame_threshold_s:
             throttle *= clamp(self.settings.slow_frame_threshold_s / dt_s, 0.25, 1.0)
+        boundary_throttle_scale = 1.0
+        recovery_throttle = clamp(float(self.settings.recovery_throttle), 0.0, self.settings.max_throttle)
+        hard_stop_distance = max(float(self.settings.hard_stop_distance_px), 1.0)
+        recovery_active = False
+        hard_stop_active = min(closest_side, front_min) < hard_stop_distance
+        if boundary_pressure_peak > 0.18:
+            boundary_throttle_scale = 1.0 - 0.80 * clamp(
+                (boundary_pressure_peak - 0.18) / 0.55,
+                0.0,
+                1.0,
+            )
+            throttle = min(throttle, self.settings.base_throttle * boundary_throttle_scale)
+            if boundary_pressure_peak > 0.32:
+                recovery_active = True
+        if anticipation_active:
+            effective_scale = clamp(float(self.settings.turn_anticipation_throttle_scale), 0.0, 1.0)
+            gradual_scale = 1.0 - (1.0 - effective_scale) * anticipation_proximity
+            throttle = min(throttle, self.settings.base_throttle * gradual_scale)
+        if closest_side < guard_distance:
+            recovery_active = True
         if front_min < self.settings.emergency_distance_px:
+            recovery_active = True
+        if recovery_active and not hard_stop_active:
+            throttle = recovery_throttle
+        if hard_stop_active:
             throttle = min(throttle, self.settings.min_throttle)
         throttle = clamp(throttle, self.settings.min_throttle, self.settings.max_throttle)
 
@@ -161,6 +287,7 @@ class RaycastLineFollower:
         diagnostics = {
             "n_rays": int(n_rays),
             "ray_fov": float(ray_fov),
+            "navigation_margin_rays": int(navigation_margin),
             "target_idx": int(target_idx),
             "target_angle": float(target_angle),
             "target_distance": float(distances[target_idx]),
@@ -169,9 +296,18 @@ class RaycastLineFollower:
             "balance": float(balance),
             "left_clear": float(left_clear),
             "right_clear": float(right_clear),
+            "left_emergency_clear": float(left_emergency_clear),
+            "right_emergency_clear": float(right_emergency_clear),
             "left_min": float(left_min),
             "right_min": float(right_min),
             "front_min": float(front_min),
+            "boundary_avoidance": float(boundary_avoidance),
+            "left_pressure": float(left_pressure),
+            "right_pressure": float(right_pressure),
+            "boundary_pressure_peak": float(boundary_pressure_peak),
+            "boundary_avoidance_distance": float(boundary_distance),
+            "anticipation_active": bool(anticipation_active),
+            "anticipation_distance": float(anticipation_distance),
             "track_center": float(center_offset),
             "track_heading": float(heading),
             "track_confidence": float(track_confidence),
@@ -183,11 +319,17 @@ class RaycastLineFollower:
                 None if guard_forced_steering is None else float(guard_forced_steering)
             ),
             "emergency_side": emergency_side,
+            "emergency_hold_remaining_s": float(self.emergency_hold_remaining_s),
             "fast_response": bool(fast_response),
             "smoothing": float(smoothing),
             "pre_smooth_steering": float(pre_smooth_steering),
             "curve_intensity": float(curve_intensity),
             "turn_factor": float(turn_factor),
+            "boundary_throttle_scale": float(boundary_throttle_scale),
+            "recovery_active": bool(recovery_active),
+            "recovery_throttle": float(recovery_throttle),
+            "hard_stop_active": bool(hard_stop_active),
+            "hard_stop_distance": float(hard_stop_distance),
             "throttle_before_slow_frame": float(throttle_before_slow_frame),
         }
         return DriveCommand(
@@ -204,12 +346,20 @@ class RaycastLineFollower:
         return clamp(dt_s / (self.settings.steering_time_constant_s + dt_s), 0.0, 1.0)
 
     def _lost(self, reason: str) -> DriveCommand:
-        steering = self.previous_steering * 0.8
+        self._lost_frames += 1
+        recovery_window = 6  # ~0.3s a 20fps
+        if self._lost_frames <= recovery_window:
+            decay = max(1.0 - 0.12 * self._lost_frames, 0.3)
+            steering = self.previous_steering * decay
+            throttle = self.settings.recovery_throttle * 0.45
+        else:
+            steering = self.previous_steering * 0.3
+            throttle = self.settings.lost_line_throttle
         self.previous_steering = steering
         return DriveCommand(
-            throttle=self.settings.lost_line_throttle,
+            throttle=throttle,
             steering=steering,
             confidence=0.0,
             reason=reason,
-            diagnostics={"lost_reason": reason},
+            diagnostics={"lost_reason": reason, "lost_frames": self._lost_frames},
         )
