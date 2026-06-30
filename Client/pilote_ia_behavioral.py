@@ -141,6 +141,8 @@ def configured_settings(
     n_rays: int,
     fov: float,
     camera_source: Optional[str] = None,
+    camera_fps: Optional[int] = None,
+    camera_warmup_frames: Optional[int] = None,
 ) -> LiveSettings:
     safe_n_rays = int(clamp(float(n_rays), 1.0, float(MAX_RAYS)))
     safe_fov = clamp(float(fov), 1.0, MAX_FOV)
@@ -150,6 +152,13 @@ def configured_settings(
     )
     if camera_source is not None:
         settings = replace(settings, camera=replace(settings.camera, source=camera_source))
+    if camera_fps is not None:
+        settings = replace(settings, camera=replace(settings.camera, fps=max(1, int(camera_fps))))
+    if camera_warmup_frames is not None:
+        settings = replace(
+            settings,
+            camera=replace(settings.camera, warmup_frames=max(0, int(camera_warmup_frames))),
+        )
     return settings
 
 
@@ -434,9 +443,10 @@ def draw_behavior_debug(
     mode: str,
     recording: bool = False,
     samples: int = 0,
+    status_label: Optional[str] = None,
 ) -> np.ndarray:
     frame = draw_debug(result, throttle, steering, reason)
-    status = "{} {}".format(mode, "REC" if recording else "IDLE")
+    status = status_label if status_label is not None else "{} {}".format(mode, "REC" if recording else "IDLE")
     cv2.putText(
         frame,
         "{} samples={}".format(status, samples),
@@ -469,6 +479,8 @@ def run_record(args: argparse.Namespace) -> None:
         n_rays=args.n_rays,
         fov=args.fov,
         camera_source=args.camera_source,
+        camera_fps=args.camera_fps,
+        camera_warmup_frames=args.camera_warmup_frames,
     )
     perception = WhiteTapePerception(settings.perception)
 
@@ -1274,6 +1286,13 @@ def apply_safety_supervisor(
     turn_factor = 1.0 - args.turn_slowdown * clamp(abs(steering), 0.0, 1.0)
     throttle *= clamp(turn_factor, args.min_turn_factor, 1.0)
     throttle = clamp(throttle, 0.0, settings.vesc.max_duty)
+    min_drive_throttle = clamp(
+        float(args.min_drive_throttle),
+        0.0,
+        min(float(args.target_throttle), float(args.hard_max_throttle), settings.vesc.max_duty),
+    )
+    if throttle > 0.0 and reason in ("model", "hybrid", "guard_left", "guard_right") and min_drive_throttle > 0.0:
+        throttle = max(throttle, min_drive_throttle)
     return throttle, steering, reason, fast_response
 
 
@@ -1308,6 +1327,8 @@ def run_drive(args: argparse.Namespace) -> None:
         n_rays=int(metadata["n_rays"]),
         fov=float(metadata["fov"]),
         camera_source=args.camera_source,
+        camera_fps=args.camera_fps,
+        camera_warmup_frames=args.camera_warmup_frames,
     )
     perception = WhiteTapePerception(settings.perception)
     ray_fallback = RaycastLineFollower(settings.controller)
@@ -1346,6 +1367,13 @@ def run_drive(args: argparse.Namespace) -> None:
     print("hard_max_throttle={:.4f}".format(args.hard_max_throttle))
     print("ray_blend={:.2f} steering_gain={:.2f}".format(args.ray_blend, args.steering_gain))
     print("n_rays={} fov={}".format(settings.perception.n_rays, settings.perception.fov))
+    print(
+        "camera_source={} camera_fps={} warmup_frames={}".format(
+            settings.camera.source,
+            settings.camera.fps,
+            settings.camera.warmup_frames,
+        )
+    )
     if run_dir is not None:
         print("logs={}".format(run_dir))
 
@@ -1416,9 +1444,10 @@ def run_drive(args: argparse.Namespace) -> None:
                 steering = clamp(steering, -1.0, 1.0)
                 previous_steering = steering
 
+                applied_throttle = throttle
                 if vesc is not None:
                     vesc.set_steering(steering)
-                    vesc.set_motor(throttle)
+                    applied_throttle = vesc.set_motor(throttle)
 
                 payload = {
                     "event": "frame",
@@ -1434,6 +1463,7 @@ def run_drive(args: argparse.Namespace) -> None:
                     "steering_raw": steering_raw,
                     "steering": steering,
                     "throttle": throttle,
+                    "applied_throttle": applied_throttle,
                     "reason": reason,
                     "fast_response": fast_response,
                     "mask_fraction": result.mask_fraction,
@@ -1452,6 +1482,7 @@ def run_drive(args: argparse.Namespace) -> None:
                             {
                                 "steering": steering,
                                 "throttle": throttle,
+                                "applied_throttle": applied_throttle,
                                 "reason": reason,
                                 "ray_reason": ray_command.reason,
                                 "mask_fraction": result.mask_fraction,
@@ -1466,12 +1497,13 @@ def run_drive(args: argparse.Namespace) -> None:
                 if args.stream or args.window:
                     debug = draw_behavior_debug(
                         result,
-                        throttle,
+                        applied_throttle,
                         steering,
                         reason,
                         mode="DRIVE",
                         recording=False,
                         samples=frame_idx,
+                        status_label="DRIVE DRY" if args.dry_run else "DRIVE LIVE",
                     )
                 if args.stream and debug is not None:
                     encode_stream_frame(debug)
@@ -1544,6 +1576,8 @@ def add_common_live_args(parser: argparse.ArgumentParser, include_perception: bo
         choices=("rgb_preview", "rgb_video", "rgb_isp", "mono_left", "mono_right"),
         default=None,
     )
+    parser.add_argument("--camera-fps", type=int, default=None)
+    parser.add_argument("--camera-warmup-frames", type=int, default=None)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1611,6 +1645,7 @@ def build_parser() -> argparse.ArgumentParser:
     drive.add_argument("--dry-run", action="store_true")
     drive.add_argument("--target-throttle", type=float, default=0.045)
     drive.add_argument("--hard-max-throttle", type=float, default=0.045)
+    drive.add_argument("--min-drive-throttle", type=float, default=0.0)
     drive.add_argument("--ray-blend", type=float, default=0.0)
     drive.add_argument("--steering-gain", type=float, default=1.25)
     drive.add_argument("--max-fps", type=float, default=12.0)
