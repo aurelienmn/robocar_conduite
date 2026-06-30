@@ -25,6 +25,7 @@ class PerceptionResult:
     track_confidence: float
     track_width_px: float
     track_points: Tuple[Tuple[int, int], ...]
+    adaptive_value_min: int = 0
 
 
 class WhiteTapePerception:
@@ -35,6 +36,25 @@ class WhiteTapePerception:
         self._track_width_px: float = 0.0
         self._track_center_offset: float = 0.0
         self._track_heading: float = 0.0
+
+    @staticmethod
+    def _adaptive_value_min(value_channel: np.ndarray, roi_top: int, roi_bottom: int,
+                             config_min: int) -> int:
+        """Seuil de luminosité adaptatif selon l'éclairage ambiant du frame.
+
+        Le ruban blanc est toujours parmi les pixels les plus lumineux dans la
+        zone de la piste. On prend le 95e percentile de cette zone comme
+        référence de luminosité maximale, puis on seuille à 85% de cette valeur.
+        En lumière vive : seuil haut → évite les faux positifs (murs éclairés).
+        En lumière faible : seuil bas → détecte quand même le ruban.
+        """
+        roi = value_channel[roi_top:roi_bottom, :]
+        if roi.size == 0:
+            return config_min
+        p95 = float(np.percentile(roi, 95))
+        adaptive = p95 * 0.85
+        floor_val = config_min * 0.65
+        return int(np.clip(max(adaptive, floor_val), 80, 240))
 
     def predict_mask(self, frame_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         if frame_bgr.ndim != 3 or frame_bgr.shape[2] != 3:
@@ -49,23 +69,32 @@ class WhiteTapePerception:
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         hsv[:, :, 2] = clahe.apply(hsv[:, :, 2])
 
+        h = frame_bgr.shape[0]
+        roi_top = int(h * self.settings.roi_top_fraction) if self.settings.roi_top_fraction > 0.0 else 0
+        roi_bottom = int(h * (1.0 - self.settings.roi_bottom_fraction)) if self.settings.roi_bottom_fraction > 0.0 else h
+
+        # Seuils adaptatifs à l'éclairage du frame courant
+        adaptive_value_min = self._adaptive_value_min(
+            hsv[:, :, 2], roi_top, roi_bottom, self.settings.white_value_min
+        )
+        brightness_scale = adaptive_value_min / max(float(self.settings.white_value_min), 1.0)
+        adaptive_min_rgb = int(np.clip(self.settings.min_rgb * brightness_scale, 60, 230))
+
         min_channel = frame_bgr.min(axis=2)
         channel_delta = frame_bgr.max(axis=2) - min_channel
 
         mask = (
-            (hsv[:, :, 2] >= self.settings.white_value_min)
+            (hsv[:, :, 2] >= adaptive_value_min)
             & (hsv[:, :, 1] <= self.settings.saturation_max)
-            & (min_channel >= self.settings.min_rgb)
+            & (min_channel >= adaptive_min_rgb)
             & (channel_delta <= self.settings.max_rgb_delta)
         )
 
         if self.settings.roi_top_fraction > 0.0:
-            top = int(mask.shape[0] * self.settings.roi_top_fraction)
-            mask[:top, :] = False
+            mask[:roi_top, :] = False
 
         if self.settings.roi_bottom_fraction > 0.0:
-            bottom = int(mask.shape[0] * (1.0 - self.settings.roi_bottom_fraction))
-            mask[bottom:, :] = False
+            mask[roi_bottom:, :] = False
 
         if self.settings.morphology_kernel > 1:
             kernel = np.ones(
@@ -95,7 +124,7 @@ class WhiteTapePerception:
                 self.settings.min_bottom_fraction,
             )
 
-        return mask, mask_before_filter
+        return mask, mask_before_filter, adaptive_value_min
 
     @staticmethod
     def _estimate_track_center(mask, width_hint: float = 0.0, center_hint: float = 0.0):
@@ -272,7 +301,7 @@ class WhiteTapePerception:
         return keep[labels]
 
     def process(self, frame_bgr: np.ndarray) -> PerceptionResult:
-        mask, mask_before_filter = self.predict_mask(frame_bgr)
+        mask, mask_before_filter, adaptive_value_min = self.predict_mask(frame_bgr)
         rejected = mask_before_filter & ~mask
         raycast = cast_rays(mask, n_rays=self.settings.n_rays, fov=self.settings.fov).astype(np.float32)
         center_offset, heading, confidence, width_px, points = self._estimate_track_center(
@@ -307,6 +336,7 @@ class WhiteTapePerception:
             track_confidence=confidence,
             track_width_px=width_px,
             track_points=points,
+            adaptive_value_min=adaptive_value_min,
         )
 
 
