@@ -239,7 +239,13 @@ class WhiteTapePerception:
         target_center = lookahead_weight * far + (1.0 - lookahead_weight) * average_center
 
         offset = (target_center - center_x) / max(center_x, 1.0)
-        heading = (far - near) / max(center_x, 1.0)
+        # Avec une seule bande visible (strong_pairs < 2), le heading calculé
+        # correspond à la direction de la bande extérieure du virage — qui va
+        # dans le sens OPPOSÉ au virage réel. On le met à zéro.
+        if strong_pairs >= 2:
+            heading = (far - near) / max(center_x, 1.0)
+        else:
+            heading = 0.0
         confidence = min(1.0, quality_total / 6.0) * (0.45 + 0.55 * consistency)
         if strong_pairs < 2:
             confidence = min(confidence, 0.45)
