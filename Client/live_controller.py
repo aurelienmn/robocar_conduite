@@ -43,6 +43,7 @@ class RaycastLineFollower:
         self.emergency_steering = 0.0
         self.turn_memory_remaining_s = 0.0
         self.turn_memory_steering = 0.0
+        self._smoothed_asymmetry = 0.0
         self._lost_frames = 0
 
     def predict(
@@ -123,18 +124,17 @@ class RaycastLineFollower:
         center_window = distances[max(0, middle - 1) : min(n_rays, middle + 2)]
         front_min = float(center_window.min())
 
-        # Asymétrie gauche/droite : signal d'entrée de virage même quand les
-        # rayons avant sont encore libres (caméra ne voit pas autour du virage).
+        # Asymétrie gauche/droite lissée sur ~8 frames pour éviter les sacades.
         side_asymmetry = abs(left_clear - right_clear) / max(left_clear + right_clear, 1.0)
         side_min_asymmetry = abs(left_min - right_min) / max(left_min + right_min, 1.0)
-        combined_asymmetry = 0.5 * side_asymmetry + 0.5 * side_min_asymmetry
-        # Dès que l'asymétrie dépasse 0.25, on réduit effective_front_min
-        # proportionnellement à l'urgence perçue du virage.
-        asymmetry_threshold = 0.25
+        raw_asymmetry = 0.5 * side_asymmetry + 0.5 * side_min_asymmetry
+        self._smoothed_asymmetry = 0.12 * raw_asymmetry + 0.88 * self._smoothed_asymmetry
+        combined_asymmetry = self._smoothed_asymmetry
+        asymmetry_threshold = 0.30
         if combined_asymmetry > asymmetry_threshold:
             turn_urgency = (combined_asymmetry - asymmetry_threshold) / (1.0 - asymmetry_threshold)
             anticipation_dist_ref = max(float(self.settings.turn_anticipation_distance_px), 1.0)
-            asymmetry_front_equiv = anticipation_dist_ref * (1.0 - clamp(turn_urgency, 0.0, 0.95))
+            asymmetry_front_equiv = anticipation_dist_ref * (1.0 - clamp(turn_urgency, 0.0, 0.90))
         else:
             asymmetry_front_equiv = float("inf")
         effective_front_min = min(front_min, asymmetry_front_equiv)

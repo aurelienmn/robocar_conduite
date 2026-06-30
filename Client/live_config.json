@@ -48,7 +48,7 @@
     "turn_memory_s": 0.80,
     "turn_memory_gain": 0.72,
     "steering_smoothing": 0.35,
-    "steering_time_constant_s": 0.12,
+    "steering_time_constant_s": 0.15,
     "throttle_turn_slowdown": 0.72,
     "slow_frame_threshold_s": 0.45,
     "stale_frame_timeout_s": 1.20,
