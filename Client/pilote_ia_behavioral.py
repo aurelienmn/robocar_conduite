@@ -771,10 +771,35 @@ def split_indices_by_session(
     sessions: Sequence[str],
     val_fraction: float,
     seed: int,
+    strategy: str,
 ) -> Tuple[np.ndarray, np.ndarray, str]:
     rng = np.random.default_rng(seed)
     unique_sessions = np.asarray(sorted(set(sessions)), dtype=object)
     indices = np.arange(len(sessions))
+
+    def row_split() -> Tuple[np.ndarray, np.ndarray, str]:
+        train_parts: List[np.ndarray] = []
+        val_parts: List[np.ndarray] = []
+        for session in sorted(set(sessions)):
+            session_idx = indices[np.asarray([item == session for item in sessions], dtype=bool)]
+            rng.shuffle(session_idx)
+            if session_idx.size <= 1:
+                train_parts.append(session_idx)
+                continue
+            val_count = max(1, int(round(session_idx.size * val_fraction)))
+            val_count = min(val_count, session_idx.size - 1)
+            val_parts.append(session_idx[:val_count])
+            train_parts.append(session_idx[val_count:])
+        train_idx = np.concatenate(train_parts) if train_parts else np.asarray([], dtype=int)
+        val_idx = np.concatenate(val_parts) if val_parts else np.asarray([], dtype=int)
+        rng.shuffle(train_idx)
+        rng.shuffle(val_idx)
+        return train_idx, val_idx, "row_balanced"
+
+    strategy = strategy.lower()
+    if strategy == "row" or (strategy == "auto" and unique_sessions.size < 4):
+        return row_split()
+
     if unique_sessions.size >= 2:
         rng.shuffle(unique_sessions)
         val_count = max(1, int(round(unique_sessions.size * val_fraction)))
@@ -785,10 +810,7 @@ def split_indices_by_session(
         if train_idx.size and val_idx.size:
             return train_idx, val_idx, "session"
 
-    shuffled = indices.copy()
-    rng.shuffle(shuffled)
-    val_count = max(1, int(round(len(shuffled) * val_fraction)))
-    return shuffled[val_count:], shuffled[:val_count], "row"
+    return row_split()
 
 
 def weighted_huber(pred: np.ndarray, target: np.ndarray, weights: np.ndarray, delta: float) -> float:
@@ -995,7 +1017,12 @@ def run_train(args: argparse.Namespace) -> None:
     if x.shape[0] < args.min_rows:
         raise RuntimeError("Not enough valid feature rows after filtering")
 
-    train_idx, val_idx, split_kind = split_indices_by_session(sessions, args.val_fraction, args.seed)
+    train_idx, val_idx, split_kind = split_indices_by_session(
+        sessions,
+        args.val_fraction,
+        args.seed,
+        args.split,
+    )
     if train_idx.size == 0 or val_idx.size == 0:
         raise RuntimeError("Unable to create train/validation split")
 
@@ -1065,6 +1092,35 @@ def run_train(args: argparse.Namespace) -> None:
     print("final train={}".format(train_metrics))
     print("final val={}".format(val_metrics))
 
+    save_feature_mean = feature_mean
+    save_feature_std = feature_std
+    save_ridge_beta = ridge_beta
+    save_mlp_params = mlp_params
+    final_fit_metrics: Optional[Dict[str, float]] = None
+    final_fit_best_epoch: Optional[int] = None
+    if args.final_fit_all:
+        save_feature_mean = x.mean(axis=0).astype(np.float32)
+        save_feature_std = x.std(axis=0)
+        save_feature_std = np.where(save_feature_std < 1e-6, 1.0, save_feature_std).astype(np.float32)
+        x_all_z = ((x - save_feature_mean) / save_feature_std).astype(np.float32)
+        save_ridge_beta = train_ridge(x_all_z, y, weights, args.ridge_alpha)
+
+        final_args = argparse.Namespace(**vars(args))
+        final_args.epochs = max(1, int(mlp_result["best_epoch"]))
+        final_args.patience = final_args.epochs + 1
+        print(
+            "final_fit_all rows={} epochs={}".format(
+                x.shape[0],
+                final_args.epochs,
+            )
+        )
+        final_result = train_mlp(x_all_z, y, weights, x_all_z, y, weights, final_args)
+        save_mlp_params = final_result["params"]
+        final_fit_best_epoch = int(final_result["best_epoch"])
+        final_pred = predict_arrays(save_mlp_params, save_ridge_beta, blend_mlp, x_all_z)
+        final_fit_metrics = metrics(final_pred, y, weights)
+        print("saved_model train_all={}".format(final_fit_metrics))
+
     model_path = resolve_path(args.output)
     model_path.parent.mkdir(parents=True, exist_ok=True)
     metadata = {
@@ -1086,7 +1142,11 @@ def run_train(args: argparse.Namespace) -> None:
         "train_rows": int(train_idx.size),
         "val_rows": int(val_idx.size),
         "sessions": int(len(set(sessions))),
+        "split_strategy": args.split,
         "split": split_kind,
+        "final_fit_all": bool(args.final_fit_all),
+        "final_fit_best_epoch": final_fit_best_epoch,
+        "final_fit_metrics": final_fit_metrics,
         "best_epoch": int(mlp_result["best_epoch"]),
         "best_val_huber": float(mlp_result["best_val_huber"]),
         "train_metrics": train_metrics,
@@ -1100,15 +1160,15 @@ def run_train(args: argparse.Namespace) -> None:
 
     np.savez(
         model_path,
-        W1=mlp_params["W1"],
-        b1=mlp_params["b1"],
-        W2=mlp_params["W2"],
-        b2=mlp_params["b2"],
-        W3=mlp_params["W3"],
-        b3=mlp_params["b3"],
-        ridge_beta=ridge_beta,
-        feature_mean=feature_mean,
-        feature_std=feature_std,
+        W1=save_mlp_params["W1"],
+        b1=save_mlp_params["b1"],
+        W2=save_mlp_params["W2"],
+        b2=save_mlp_params["b2"],
+        W3=save_mlp_params["W3"],
+        b3=save_mlp_params["b3"],
+        ridge_beta=save_ridge_beta,
+        feature_mean=save_feature_mean,
+        feature_std=save_feature_std,
         metadata=np.asarray(json.dumps(metadata, sort_keys=True)),
     )
     print("Saved model: {}".format(model_path))
@@ -1526,6 +1586,8 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--fov", type=float, default=MAX_FOV)
     train.add_argument("--min-rows", type=int, default=300)
     train.add_argument("--val-fraction", type=float, default=0.20)
+    train.add_argument("--split", choices=("auto", "row", "session"), default="auto")
+    train.add_argument("--no-final-fit-all", dest="final_fit_all", action="store_false")
     train.add_argument("--seed", type=int, default=123)
     train.add_argument("--ray-scale-px", type=float, default=None)
     train.add_argument("--hidden1", type=int, default=64)
@@ -1540,6 +1602,7 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--patience", type=int, default=28)
     train.add_argument("--print-every", type=int, default=10)
     train.add_argument("--blend-mlp", type=float, default=-1.0)
+    train.set_defaults(final_fit_all=True)
     train.set_defaults(func=run_train)
 
     drive = subparsers.add_parser("drive", help="Run the trained IA pilot.")
