@@ -15,7 +15,7 @@
     "min_rgb": 115,
     "max_rgb_delta": 50,
     "roi_top_fraction": 0.35,
-    "roi_bottom_fraction": 0.06,
+    "roi_bottom_fraction": 0.14,
     "morphology_kernel": 3,
     "open_iterations": 1,
     "dilate_iterations": 0,

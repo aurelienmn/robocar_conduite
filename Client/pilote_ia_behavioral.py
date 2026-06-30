@@ -26,6 +26,7 @@ for import_path in (CLIENT_DIR, ROOT / "Gamepad"):
 import Gamepad  # noqa: E402
 
 from live_perception import PerceptionResult, WhiteTapePerception, draw_debug  # noqa: E402
+from live_controller import RaycastLineFollower  # noqa: E402
 from live_settings import DEFAULT_CONFIG, LiveSettings, load_settings  # noqa: E402
 from oak_camera import OakCamera  # noqa: E402
 from vesc_control import VescController  # noqa: E402
@@ -1180,7 +1181,7 @@ def apply_safety_supervisor(
 
     stats = ray_safety_stats(result.raycast)
     steering = clamp(float(model_steering), -1.0, 1.0)
-    throttle = float(args.target_throttle)
+    throttle = min(float(args.target_throttle), float(args.hard_max_throttle))
     reason = "model"
     fast_response = False
 
@@ -1249,6 +1250,7 @@ def run_drive(args: argparse.Namespace) -> None:
         camera_source=args.camera_source,
     )
     perception = WhiteTapePerception(settings.perception)
+    ray_fallback = RaycastLineFollower(settings.controller)
 
     start_stream_if_needed(args.stream, args.stream_port)
 
@@ -1281,6 +1283,8 @@ def run_drive(args: argparse.Namespace) -> None:
     print("model={}".format(model["path"]))
     print("dry_run={}".format(args.dry_run))
     print("target_throttle={:.4f}".format(args.target_throttle))
+    print("hard_max_throttle={:.4f}".format(args.hard_max_throttle))
+    print("ray_blend={:.2f} steering_gain={:.2f}".format(args.ray_blend, args.steering_gain))
     print("n_rays={} fov={}".format(settings.perception.n_rays, settings.perception.fov))
     if run_dir is not None:
         print("logs={}".format(run_dir))
@@ -1311,15 +1315,37 @@ def run_drive(args: argparse.Namespace) -> None:
                     model,
                     result,
                     prev_steering=previous_steering,
-                    throttle=args.target_throttle,
+                    throttle=clamp(
+                        min(args.target_throttle, args.hard_max_throttle)
+                        / max(settings.vesc.max_duty, 1e-6),
+                        0.0,
+                        1.0,
+                    ),
                 )
+                ray_command = ray_fallback.predict(
+                    result.raycast,
+                    result.mask_fraction,
+                    dt_s=dt_s,
+                    ray_fov=result.ray_fov,
+                    track_center_offset=result.track_center_offset,
+                    track_heading=result.track_heading,
+                    track_confidence=result.track_confidence,
+                )
+                ray_blend = clamp(float(args.ray_blend), 0.0, 1.0)
+                hybrid_steering = (
+                    (1.0 - ray_blend) * model_steering
+                    + ray_blend * ray_command.steering
+                )
+                hybrid_steering = clamp(hybrid_steering * args.steering_gain, -1.0, 1.0)
                 throttle, steering_raw, reason, fast_response = apply_safety_supervisor(
-                    model_steering,
+                    hybrid_steering,
                     result,
                     settings,
                     args,
                     dt_s,
                 )
+                if reason == "model" and ray_blend > 0.0:
+                    reason = "hybrid"
 
                 alpha = args.steering_alpha
                 if dt_s is not None and args.steering_tau > 0.0:
@@ -1342,6 +1368,9 @@ def run_drive(args: argparse.Namespace) -> None:
                     "dt_s": dt_s,
                     "fps": None if dt_s is None else 1.0 / max(dt_s, 1e-6),
                     "model_steering": model_steering,
+                    "ray_steering": ray_command.steering,
+                    "ray_reason": ray_command.reason,
+                    "hybrid_steering": hybrid_steering,
                     "steering_raw": steering_raw,
                     "steering": steering,
                     "throttle": throttle,
@@ -1364,6 +1393,7 @@ def run_drive(args: argparse.Namespace) -> None:
                                 "steering": steering,
                                 "throttle": throttle,
                                 "reason": reason,
+                                "ray_reason": ray_command.reason,
                                 "mask_fraction": result.mask_fraction,
                                 "raycast": [int(v) for v in result.raycast],
                             },
@@ -1517,6 +1547,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_live_args(drive, include_perception=False)
     drive.add_argument("--dry-run", action="store_true")
     drive.add_argument("--target-throttle", type=float, default=0.045)
+    drive.add_argument("--hard-max-throttle", type=float, default=0.045)
+    drive.add_argument("--ray-blend", type=float, default=0.0)
+    drive.add_argument("--steering-gain", type=float, default=1.25)
     drive.add_argument("--max-fps", type=float, default=12.0)
     drive.add_argument("--frames", type=int, default=0)
     drive.add_argument("--headless", action="store_true")
