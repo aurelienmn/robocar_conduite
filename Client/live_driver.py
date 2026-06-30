@@ -30,5 +30,13 @@ class LiveDriver:
         self.previous_prediction_time = now
 
         perception = self.perception.process(frame_bgr)
-        command = self.controller.predict(perception.raycast, perception.mask_fraction, dt_s=dt_s)
+        command = self.controller.predict(
+            perception.raycast,
+            perception.mask_fraction,
+            dt_s=dt_s,
+            ray_fov=perception.ray_fov,
+            track_center_offset=perception.track_center_offset,
+            track_heading=perception.track_heading,
+            track_confidence=perception.track_confidence,
+        )
         return LiveResult(command=command, perception=perception, dt_s=dt_s)
