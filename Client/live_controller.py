@@ -122,6 +122,23 @@ class RaycastLineFollower:
 
         center_window = distances[max(0, middle - 1) : min(n_rays, middle + 2)]
         front_min = float(center_window.min())
+
+        # Asymétrie gauche/droite : signal d'entrée de virage même quand les
+        # rayons avant sont encore libres (caméra ne voit pas autour du virage).
+        side_asymmetry = abs(left_clear - right_clear) / max(left_clear + right_clear, 1.0)
+        side_min_asymmetry = abs(left_min - right_min) / max(left_min + right_min, 1.0)
+        combined_asymmetry = 0.5 * side_asymmetry + 0.5 * side_min_asymmetry
+        # Dès que l'asymétrie dépasse 0.25, on réduit effective_front_min
+        # proportionnellement à l'urgence perçue du virage.
+        asymmetry_threshold = 0.25
+        if combined_asymmetry > asymmetry_threshold:
+            turn_urgency = (combined_asymmetry - asymmetry_threshold) / (1.0 - asymmetry_threshold)
+            anticipation_dist_ref = max(float(self.settings.turn_anticipation_distance_px), 1.0)
+            asymmetry_front_equiv = anticipation_dist_ref * (1.0 - clamp(turn_urgency, 0.0, 0.95))
+        else:
+            asymmetry_front_equiv = float("inf")
+        effective_front_min = min(front_min, asymmetry_front_equiv)
+
         reason = "target_ray={}".format(target_idx)
         boundary_distance = max(float(self.settings.boundary_avoidance_distance_px), 1.0)
         boundary_closeness = np.clip((boundary_distance - distances) / boundary_distance, 0.0, 1.0)
@@ -182,9 +199,11 @@ class RaycastLineFollower:
         guard_forced_steering = None
         anticipation_distance = max(float(self.settings.turn_anticipation_distance_px), 1.0)
         anticipation_steering = clamp(float(self.settings.turn_anticipation_steering), 0.0, 1.0)
-        anticipation_active = front_min < anticipation_distance
+        # effective_front_min intègre l'asymétrie gauche/droite : détecte les
+        # virages même quand les rayons avant sont encore libres.
+        anticipation_active = effective_front_min < anticipation_distance
         anticipation_proximity = (
-            clamp(1.0 - front_min / anticipation_distance, 0.0, 1.0)
+            clamp(1.0 - effective_front_min / anticipation_distance, 0.0, 1.0)
             if anticipation_active
             else 0.0
         )
@@ -356,6 +375,8 @@ class RaycastLineFollower:
             "left_min": float(left_min),
             "right_min": float(right_min),
             "front_min": float(front_min),
+            "effective_front_min": float(effective_front_min),
+            "side_asymmetry": float(combined_asymmetry),
             "boundary_avoidance": float(boundary_avoidance),
             "left_pressure": float(left_pressure),
             "right_pressure": float(right_pressure),
